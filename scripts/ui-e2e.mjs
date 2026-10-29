@@ -147,8 +147,13 @@ async function wdConnect() {
     try { if ((await (await fetch(`${WD}/status`)).json()).value) break; } catch { /* starting */ }
     await sleep(500);
   }
-  const s = await wd('POST', '/session', { capabilities: { alwaysMatch: { 'tauri:options': { application: exe } } } });
-  wdSession = s.sessionId;
+  try {
+    const s = await wd('POST', '/session', { capabilities: { alwaysMatch: { 'tauri:options': { application: exe } } } });
+    wdSession = s.sessionId;
+  } catch (e) {
+    const sh = (c) => { try { return execFileSync('sh', ['-c', c]).toString(); } catch (x) { return String(x); } };
+    throw new Error(`${e}\n--- processes\n${sh("ps -eo pid,ppid,args | grep -iE 'agentgoodnight|WebKit|tauri-driver' | grep -v grep")}\n--- windows\n${sh('xwininfo -root -tree 2>&1 | grep -iE \'agentgoodnight|"\' | head -20')}`);
+  }
 }
 
 let cdp;
@@ -220,7 +225,7 @@ const env = {
   // its own.
   ...(WIN ? { AGN_TEST_DEVTOOLS_PORT: String(PORT) } : {}),
   // Linux: Tauri lets WebKitWebDriver automate the window only with this.
-  ...(WIN ? {} : { TAURI_WEBVIEW_AUTOMATION: 'true' }),
+  ...(WIN ? {} : { TAURI_WEBVIEW_AUTOMATION: 'true', WEBKIT_DEBUG: 'Automation,RemoteInspector' }),
 };
 // Linux: tauri-driver starts the app (with this environment) for the session.
 const app = WIN

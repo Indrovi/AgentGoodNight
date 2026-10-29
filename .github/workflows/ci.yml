@@ -111,7 +111,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo apt-get install -y webkit2gtk-driver
+          sudo apt-get install -y webkit2gtk-driver x11-utils
           cargo install tauri-driver --locked
           cargo build -p agentgoodnight -p agn-hook
           xvfb-run -a node scripts/ui-e2e.mjs target/debug/agentgoodnight

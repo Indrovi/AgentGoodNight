@@ -79,7 +79,9 @@ pub fn build_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             ))
             .data_directory(agn_core::paths::data_dir().join("webview-test"));
     }
-    builder.build()
+    let window = builder.build()?;
+    tracing::info!("main window opened");
+    Ok(window)
 }
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
