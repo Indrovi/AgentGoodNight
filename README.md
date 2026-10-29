@@ -104,10 +104,10 @@ Without `--features real-power` the build contains only the simulated power mana
   a DryRun manager that only records what it would have done (the UI shows a *DRY RUN* badge).
 - `cargo run -p agn-adapters --example probe` prints what the monitor sees on your machine,
   read-only.
-- `node scripts/ui-e2e.mjs` (Windows) drives the real window of the debug build through the whole
-  overnight flow against a sandbox; `scripts/smoke-app.sh` checks that a built app starts. What is
-  verified where, and the checklist for a first real power test, are in
-  [docs/testing.md](docs/testing.md).
+- `node scripts/ui-e2e.mjs` (Windows; Linux through `tauri-driver` and WebKitWebDriver) drives
+  the real window of the debug build through the whole overnight flow against a sandbox;
+  `scripts/smoke-app.sh` checks that a built app opens its window. What is verified where, and the
+  checklist for a first real power test, are in [docs/testing.md](docs/testing.md).
 
 ```
 crates/agn-core      session model, tracker, safety policy, countdown, power backends, spool

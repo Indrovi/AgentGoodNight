@@ -18,8 +18,9 @@ log="$data/app.log"
 export AGN_DATA_DIR="$data" WEBVIEW2_USER_DATA_FOLDER="$data/webview" NO_COLOR=1
 
 if [[ "$os" == Linux ]]; then
-  # Own process group, so Xvfb, the app and its WebKit processes stop together.
-  setsid xvfb-run -a "$bin" >"$log" 2>&1 &
+  # Own process group, so Xvfb, the app and its WebKit processes stop
+  # together; a D-Bus session like on a desktop.
+  setsid dbus-run-session -- xvfb-run -a "$bin" >"$log" 2>&1 &
 else
   "$bin" >"$log" 2>&1 &
 fi

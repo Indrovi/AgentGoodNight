@@ -190,10 +190,18 @@ async function until(expr, timeout, what) {
 }
 async function click(selector) {
   if (!WIN) {
-    // WebDriver element click: scrolls into view and uses real input.
-    const el = await wd('POST', `/session/${wdSession}/element`, { using: 'css selector', value: selector });
-    await wd('POST', `/session/${wdSession}/element/${Object.values(el)[0]}/click`, {});
-    return;
+    // WebDriver element click: scrolls into view and uses real input. Lists
+    // re-render with every snapshot, so a found element can go stale.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const el = await wd('POST', `/session/${wdSession}/element`, { using: 'css selector', value: selector });
+        await wd('POST', `/session/${wdSession}/element/${Object.values(el)[0]}/click`, {});
+        return;
+      } catch (e) {
+        if (attempt >= 5 || !/stale element/.test(String(e))) throw e;
+        await sleep(100);
+      }
+    }
   }
   const box = await js(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return null; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return r.width ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null; })()`);
   if (!box) throw new Error(`not clickable: ${selector}`);

@@ -11,17 +11,19 @@ app works on an OS.
 | Unit tests, overnight simulations, regression tests for every review finding (`cargo test --workspace`) | ✓ | ✓ | ✓ |
 | Real power backend compiles (`--release --features real-power`, never executed) | ✓ | ✓ | ✓ |
 | DryRun release bundle | ✓ | ✓ | ✓ |
-| Start-up smoke test of the built app: window, tray and monitor thread come up and keep running (`scripts/smoke-app.sh`, Linux under Xvfb) | ✓ | ✓ | ✓ |
-| End-to-end UI test of the real window (`scripts/ui-e2e.mjs`) | ✓ | – | – |
+| Start-up smoke test of the built app: the main window opens, the app keeps running and stops cleanly (`scripts/smoke-app.sh`, Linux under Xvfb) | ✓ | ✓ | ✓ |
+| End-to-end UI test of the real window (`scripts/ui-e2e.mjs`) | ✓ | – | ✓ |
 
 The UI test starts the **debug** build (it contains only the DryRun power manager) against a
-throw-away sandbox and drives the WebView2 window over the DevTools protocol with real mouse
-input: three concurrent sessions, rate limit, background task, interrupt and exclusion, arming,
-countdown, Cancel, new activity cancelling the countdown, the countdown switching from the tools
-panel to the main view, the simulated action, Connect/Disconnect of every integration into the
-sandbox, the tracking switches, closing the window to the tray (the webview is released) and the
-window reopening for a countdown. WebKitGTK and WKWebView offer no such protocol, so on macOS and
-Linux only the smoke test covers the GUI.
+throw-away sandbox and drives the real window: three concurrent sessions, rate limit, background
+task, interrupt and exclusion, arming, countdown, Cancel, new activity cancelling the countdown,
+the countdown switching from the tools panel to the main view, the simulated action,
+Connect/Disconnect of every integration into the sandbox and the tracking switches. On Windows it
+uses the WebView2 DevTools protocol with real mouse input and also closes the window to the tray
+(the webview is released) and checks that a countdown reopens it. On Linux it uses WebDriver
+through `tauri-driver` and WebKitWebDriver (under Xvfb); a WebDriver session ends with its window,
+so the tray part is Windows-only there. macOS has no WebDriver for WKWebView, so only the smoke
+test covers its GUI.
 
 ## Manual verification so far
 
