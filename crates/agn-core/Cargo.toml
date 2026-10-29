@@ -1,0 +1,32 @@
+[package]
+name = "agn-core"
+description = "Session model, safety policy and power management for AgentGoodNight"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# Compiles the real OS power backend. It is additionally gated on
+# `not(debug_assertions)`, so dev/test builds can never contain it.
+real-power = ["dep:windows-sys"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Power",
+    "Win32_System_Shutdown",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true

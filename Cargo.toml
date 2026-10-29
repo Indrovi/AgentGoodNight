@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/agn-core", "crates/agn-adapters"]
+default-members = ["crates/agn-core", "crates/agn-adapters"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Indrovi/AgentGoodNight"
+authors = ["Indrovi"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+agn-core = { path = "crates/agn-core" }
+agn-adapters = { path = "crates/agn-adapters" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tracing = "0.1"
+dirs = "6"
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
