@@ -4,7 +4,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agn_adapters::integration::{IntegrationEnv, hook_bin_name};
 use agn_adapters::monitor::{Monitor, MonitorPaths, ProcessSource, Snapshot};
@@ -14,7 +14,7 @@ use agn_core::config::Settings;
 use agn_core::countdown::Phase;
 use agn_core::paths;
 use agn_core::power::{PowerBackend, PowerManager, system_power_manager};
-use agn_core::time::{Millis, now_millis};
+use agn_core::time::now_millis;
 use tauri::{AppHandle, Emitter};
 
 use crate::tray;
@@ -28,7 +28,8 @@ pub struct Engine {
     last_json: Mutex<String>,
     last_phase: Mutex<Phase>,
     saved_revision: AtomicU64,
-    last_save: Mutex<Millis>,
+    /// Monotonic: a wall clock turned back must not stop periodic saves.
+    last_save: Mutex<Option<Instant>>,
 }
 
 impl Engine {
@@ -37,10 +38,13 @@ impl Engine {
         let settings = Settings::load(&paths::settings_path());
         let power = system_power_manager();
         let hook_source = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(hook_bin_name())));
+        let home = dirs_home();
         let monitor_paths = MonitorPaths {
             data_dir: data_dir.clone(),
             claude_root: claude::default_root(),
             codex_root: codex::default_root(),
+            default_claude_root: home.as_ref().map(|h| h.join(".claude")),
+            default_codex_root: home.as_ref().map(|h| h.join(".codex")),
             integration: IntegrationEnv::system(data_dir.clone(), paths::spool_dir(), hook_source),
         };
         let mut monitor =
@@ -55,7 +59,7 @@ impl Engine {
             last_json: Mutex::new(String::new()),
             last_phase: Mutex::new(Phase::Off),
             saved_revision: AtomicU64::new(0),
-            last_save: Mutex::new(0),
+            last_save: Mutex::new(None),
         }
     }
 
@@ -81,20 +85,20 @@ impl Engine {
     /// Persists tracked sessions when they changed (at most every 30 s
     /// unless `force`).
     pub fn persist(&self, force: bool) {
-        let now = now_millis();
         let mut last = self.last_save.lock().unwrap_or_else(|p| p.into_inner());
-        if !force && now - *last < 30_000 {
+        if !force && last.is_some_and(|t| t.elapsed() < Duration::from_secs(30)) {
             return;
         }
         let m = self.monitor();
         let rev = m.tracker().revision();
         if force || rev != self.saved_revision.load(Ordering::Relaxed) {
-            if let Err(e) = m.save_state(&paths::state_path()) {
-                tracing::warn!(error = %e, "could not persist sessions");
+            match m.save_state(&paths::state_path()) {
+                // Only a successful save counts as saved.
+                Ok(()) => self.saved_revision.store(rev, Ordering::Relaxed),
+                Err(e) => tracing::warn!(error = %e, "could not persist sessions"),
             }
-            self.saved_revision.store(rev, Ordering::Relaxed);
         }
-        *last = now;
+        *last = Some(Instant::now());
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -127,6 +131,9 @@ impl Engine {
                 }
             }
         }
+        // Take the hand-off under a fresh lock: a Cancel clicked while the
+        // final rescan held the lock voids it.
+        let action = action.and_then(|_| self.monitor().take_pending_action(now_millis()));
         if let Some(action) = action {
             tracing::warn!(?action, backend = ?self.power.backend(), "all checks passed twice, executing power action");
             let result = self.power.execute(action).map_err(|e| e.to_string());
@@ -165,6 +172,10 @@ impl Default for Engine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    dirs::home_dir()
 }
 
 pub fn spawn_loop(app: AppHandle, engine: Arc<Engine>) {

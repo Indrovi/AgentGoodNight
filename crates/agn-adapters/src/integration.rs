@@ -39,6 +39,8 @@ pub enum IntegrationError {
     Unsupported(AgentKind),
     #[error("hook binary not found at {0}")]
     MissingHook(String),
+    #[error("the installed hook {0} is in use and could not be updated; try again in a moment")]
+    HookInUse(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,7 +191,7 @@ pub fn install(agent: AgentKind, env: &IntegrationEnv) -> Result<Option<PathBuf>
                 });
             }
             remove_our_hooks(&mut root);
-            add_hooks(agent, &mut root, &hook);
+            add_hooks(agent, &mut root, &hook, &env.data_dir);
             write_json(&path, &root)?;
         }
     }
@@ -236,11 +238,13 @@ pub fn deploy_hook(env: &IntegrationEnv) -> Result<PathBuf, IntegrationError> {
         let tmp = dst.with_extension("new");
         fs::copy(&src, &tmp)?;
         // Replacing a binary that a hook is executing right now can fail on
-        // Windows; keep the old copy in that case.
+        // Windows. An identical copy is fine; a different (older) one would
+        // be configured with arguments it may not understand: fail instead.
         if fs::rename(&tmp, &dst).is_err() {
+            let same = fs::read(&tmp).ok().zip(fs::read(&dst).ok()).is_some_and(|(a, b)| a == b);
             let _ = fs::remove_file(&tmp);
-            if !dst.exists() {
-                return Err(IntegrationError::MissingHook(dst.display().to_string()));
+            if !same {
+                return Err(IntegrationError::HookInUse(dst.display().to_string()));
             }
         }
     }
@@ -336,7 +340,7 @@ fn remove_our_hooks(root: &mut Value) -> bool {
     changed
 }
 
-fn add_hooks(agent: AgentKind, root: &mut Value, hook: &Path) {
+fn add_hooks(agent: AgentKind, root: &mut Value, hook: &Path, data_dir: &Path) {
     let obj = root.as_object_mut().expect("checked object");
     let hooks = obj.entry("hooks").or_insert_with(|| Value::Object(Map::new()));
     if !hooks.is_object() {
@@ -344,13 +348,16 @@ fn add_hooks(agent: AgentKind, root: &mut Value, hook: &Path) {
     }
     let hooks = hooks.as_object_mut().expect("object");
     let hook_s = hook.to_string_lossy().to_string();
+    // The data dir is passed explicitly: the agent's environment may differ
+    // from the app's (AGN_DATA_DIR).
+    let data_s = data_dir.to_string_lossy().to_string();
     match agent {
         AgentKind::ClaudeCode => {
             for (event, run_async) in CLAUDE_EVENTS {
                 let mut handler = json!({
                     "type": "command",
                     "command": hook_s,
-                    "args": ["claude_code"],
+                    "args": ["claude_code", "--data-dir", data_s],
                     "timeout": 10,
                 });
                 if *run_async {
@@ -364,7 +371,7 @@ fn add_hooks(agent: AgentKind, root: &mut Value, hook: &Path) {
                 let handler = json!({
                     "type": "command",
                     "name": "agentgoodnight",
-                    "command": format!("\"{hook_s}\" gemini_cli"),
+                    "command": format!("\"{hook_s}\" gemini_cli --data-dir \"{data_s}\""),
                     "timeout": 10000,
                     "description": "AgentGoodNight lifecycle monitor (no effect on the agent)",
                 });
@@ -374,9 +381,11 @@ fn add_hooks(agent: AgentKind, root: &mut Value, hook: &Path) {
         AgentKind::Cursor => {
             // Cursor runs hook commands through PowerShell on Windows.
             let command = if cfg!(windows) {
-                format!("& '{}' cursor", hook_s.replace('\'', "''"))
+                let q = |s: &str| s.replace('\'', "''");
+                format!("& '{}' cursor --data-dir '{}'", q(&hook_s), q(&data_s))
             } else {
-                format!("'{}' cursor", hook_s.replace('\'', "'\\''"))
+                let q = |s: &str| s.replace('\'', "'\\''");
+                format!("'{}' cursor --data-dir '{}'", q(&hook_s), q(&data_s))
             };
             for event in CURSOR_EVENTS {
                 push_event(hooks, event, json!({ "command": command, "timeout": 10 }));
@@ -443,7 +452,8 @@ mod tests {
         assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "notify-send done");
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2);
         let ours = &v["hooks"]["Stop"][1]["hooks"][0];
-        assert_eq!(ours["args"], json!(["claude_code"]));
+        assert_eq!(ours["args"][0], json!("claude_code"));
+        assert_eq!(ours["args"][1], json!("--data-dir"));
         assert!(ours.get("async").is_none());
         assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["async"], true);
         // Key order preserved (preserve_order feature).
@@ -468,7 +478,9 @@ mod tests {
         assert_eq!(install(AgentKind::GeminiCli, &env).unwrap(), None);
         let p = dir.path().join(".gemini/settings.json");
         let v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
-        assert!(v["hooks"]["AfterAgent"][0]["hooks"][0]["command"].as_str().unwrap().ends_with("\" gemini_cli"));
+        assert!(
+            v["hooks"]["AfterAgent"][0]["hooks"][0]["command"].as_str().unwrap().contains("\" gemini_cli --data-dir")
+        );
         uninstall(AgentKind::GeminiCli, &env).unwrap();
         let v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
         assert_eq!(v, json!({}));

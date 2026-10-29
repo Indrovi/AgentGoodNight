@@ -108,13 +108,22 @@ pub struct PolicyInput<'a> {
     pub alive: &'a dyn Fn(&Session) -> bool,
 }
 
-/// Is this session part of tonight's decision?
+/// Is this session part of tonight's decision? Quiet sessions stay relevant
+/// while their process lives — unless the only reason they block is history
+/// we never saw (a long-idle desktop session would otherwise block forever).
 pub fn is_relevant(s: &Session, now: Millis, cfg: &PolicyConfig, alive: bool) -> bool {
     if s.ignored {
         return false;
     }
     let recent = now - s.last_activity <= cfg.relevance_window;
-    recent || (alive && s.state.is_blocking())
+    let only_history = s.state == SessionState::AwaitingContinuation
+        && s.background.len() == 1
+        && s.background.contains(crate::tracker::HISTORY_UNKNOWN)
+        && s.open_subagents.is_empty()
+        && s.wakeups.is_empty()
+        && !s.recurring
+        && !s.goal_active;
+    recent || (alive && s.state.is_blocking() && !only_history)
 }
 
 pub fn evaluate(input: &PolicyInput<'_>, cfg: &PolicyConfig) -> Verdict {

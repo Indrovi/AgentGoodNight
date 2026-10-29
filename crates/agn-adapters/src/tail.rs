@@ -23,6 +23,16 @@ pub fn mtime_millis(meta: &fs::Metadata) -> Millis {
     meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as Millis).unwrap_or(0)
 }
 
+/// Resumable reading position of a [`FileTail`] (persisted across runs so
+/// a restart continues where it stopped instead of re-reading history).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TailState {
+    pub offset: u64,
+    pub len_seen: u64,
+    pub mtime: Millis,
+    pub lines_emitted: usize,
+}
+
 #[derive(Debug)]
 pub struct FileTail {
     pub path: PathBuf,
@@ -65,12 +75,42 @@ impl FileTail {
         self.mtime
     }
 
+    /// Position after the last complete line read so far.
+    pub fn state(&self) -> Option<TailState> {
+        self.started.then(|| TailState {
+            offset: self.offset - self.partial.len() as u64,
+            len_seen: self.len_seen.min(self.offset - self.partial.len() as u64),
+            mtime: self.mtime,
+            lines_emitted: self.lines_emitted,
+        })
+    }
+
+    /// Continues from a saved position; falls back to a fresh tail when the
+    /// file is now shorter (replaced or truncated).
+    pub fn resume(path: PathBuf, st: &TailState) -> Self {
+        let mut t = Self::new(path);
+        let len = fs::metadata(&t.path).map(|m| m.len()).unwrap_or(0);
+        let valid = if t.compressed { true } else { len >= st.offset };
+        if valid {
+            t.offset = st.offset;
+            t.len_seen = st.len_seen;
+            t.mtime = st.mtime;
+            t.lines_emitted = st.lines_emitted;
+            t.started = true;
+        }
+        t
+    }
+
+    pub fn is_started(&self) -> bool {
+        self.started
+    }
+
     /// Reads complete lines appended since the last call.
     pub fn read_new(&mut self, initial_window: u64) -> io::Result<TailRead> {
         let meta = fs::metadata(&self.path)?;
         let len = meta.len();
         let mtime = mtime_millis(&meta);
-        if self.started && len == self.len_seen && mtime == self.mtime {
+        if self.started && len == self.len_seen && mtime == self.mtime && (self.compressed || self.offset >= len) {
             return Ok(TailRead { mtime, ..Default::default() });
         }
         let grew = self.started && (len != self.len_seen || mtime != self.mtime);
@@ -259,6 +299,44 @@ pub fn list_files(dir: &Path, pred: impl Fn(&str) -> bool) -> io::Result<Vec<(Pa
     Ok(out)
 }
 
+/// Directory listings on Windows report a stale mtime for files another
+/// process keeps open for writing. This cache re-reads the real mtime (by
+/// opening the file's metadata) for entries that *look* old, at most once a
+/// minute per file.
+#[derive(Debug, Default)]
+pub struct MtimeCache {
+    checked: std::collections::HashMap<PathBuf, (Millis, Millis)>,
+}
+
+impl MtimeCache {
+    pub fn accurate(&mut self, path: &Path, listed: Millis, now: Millis, window: Millis) -> Millis {
+        if !cfg!(windows) || now - listed <= window {
+            return listed;
+        }
+        if let Some((at, mtime)) = self.checked.get(path) {
+            if now - at < 60_000 && now >= *at {
+                return *mtime;
+            }
+        }
+        let mtime = fs::metadata(path).map(|m| mtime_millis(&m)).unwrap_or(listed).max(listed);
+        if self.checked.len() > 50_000 {
+            self.checked.clear();
+        }
+        self.checked.insert(path.to_path_buf(), (now, mtime));
+        mtime
+    }
+}
+
+/// Real mtime of a directory entry's file (see [`MtimeCache`]).
+fn entry_mtime(e: &fs::DirEntry, meta: &fs::Metadata) -> Millis {
+    let listed = mtime_millis(meta);
+    if cfg!(windows) && e.file_name().to_str().is_some_and(|n| n.ends_with(".jsonl")) {
+        fs::metadata(e.path()).map(|m| mtime_millis(&m)).unwrap_or(listed).max(listed)
+    } else {
+        listed
+    }
+}
+
 /// Newest modification time of any file below `dir`, bounded in depth and
 /// file count so a huge tree cannot stall the monitor.
 pub fn newest_mtime(dir: &Path, max_depth: usize, budget: &mut usize) -> Option<Millis> {
@@ -273,7 +351,7 @@ pub fn newest_mtime(dir: &Path, max_depth: usize, budget: &mut usize) -> Option<
         let t = if meta.is_dir() {
             if max_depth == 0 { None } else { newest_mtime(&e.path(), max_depth - 1, budget) }
         } else {
-            Some(mtime_millis(&meta))
+            Some(entry_mtime(&e, &meta))
         };
         if let Some(t) = t {
             best = Some(best.map_or(t, |b: Millis| b.max(t)));

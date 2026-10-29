@@ -29,9 +29,17 @@ pub struct AgentProcess {
     pub name: String,
     pub role: ProcessRole,
     pub origin: Option<String>,
-    /// Working directory, when the OS lets us read it.
+    /// Working directory, when the OS lets us read it (for Codex: the
+    /// directory given with `-C/--cd`, resolved against it).
     #[serde(default)]
     pub cwd: Option<String>,
+    /// `CLAUDE_CONFIG_DIR` / `CODEX_HOME` of the process, if set: its data
+    /// lives there, not necessarily where we look.
+    #[serde(default)]
+    pub config_home: Option<String>,
+    /// Parent process id (launchers, helper children).
+    #[serde(default)]
+    pub parent: Option<u32>,
 }
 
 #[derive(Default)]
@@ -64,12 +72,15 @@ impl ProcessScanner {
             return Err("process list is empty".into());
         }
         let mut out = Vec::new();
-        let mut wsl_vm = false;
+        let mut names = Vec::new();
         for (pid, p) in sys.processes() {
             let name = p.name().to_string_lossy().to_string();
-            wsl_vm |= is_wsl_vm(&name);
+            names.push(name.clone());
             let cmd: Vec<String> = p.cmd().iter().map(|s| s.to_string_lossy().to_string()).collect();
             if let Some((agent, role, origin)) = classify(&name, p.exe(), &cmd) {
+                let os_cwd = p.cwd().map(|c| c.to_string_lossy().into_owned()).filter(|c| !c.is_empty());
+                let cwd =
+                    if agent == AgentKind::Codex { codex_cwd(&cmd, os_cwd.as_deref()).or(os_cwd) } else { os_cwd };
                 out.push(AgentProcess {
                     agent,
                     pid: pid.as_u32(),
@@ -77,14 +88,60 @@ impl ProcessScanner {
                     name,
                     role,
                     origin,
-                    cwd: p.cwd().map(|c| c.to_string_lossy().into_owned()).filter(|c| !c.is_empty()),
+                    cwd,
+                    config_home: None,
+                    parent: p.parent().map(|pp| pp.as_u32()),
                 });
             }
         }
-        self.wsl_vm = wsl_vm;
+        self.wsl_vm = wsl_vm_running(&names);
+        // Where does each Claude Code / Codex process keep its data?
+        let env_pids: Vec<sysinfo::Pid> = out
+            .iter()
+            .filter(|p| matches!(p.agent, AgentKind::ClaudeCode | AgentKind::Codex))
+            .map(|p| sysinfo::Pid::from_u32(p.pid))
+            .collect();
+        if !env_pids.is_empty() {
+            let env_kind = ProcessRefreshKind::nothing().with_environ(UpdateKind::OnlyIfNotSet);
+            sys.refresh_processes_specifics(ProcessesToUpdate::Some(&env_pids), false, env_kind);
+            for ap in out.iter_mut() {
+                let var = match ap.agent {
+                    AgentKind::ClaudeCode => "CLAUDE_CONFIG_DIR=",
+                    AgentKind::Codex => "CODEX_HOME=",
+                    _ => continue,
+                };
+                if let Some(p) = sys.process(sysinfo::Pid::from_u32(ap.pid)) {
+                    ap.config_home = p
+                        .environ()
+                        .iter()
+                        .filter_map(|e| e.to_str())
+                        .find_map(|e| e.strip_prefix(var))
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_string);
+                }
+            }
+        }
         out.sort_by_key(|p| (p.agent, p.pid));
         Ok(out)
     }
+}
+
+/// Parent chain of the current process (nearest first, at most `max`).
+/// Used by the hook binary to name the agent process that invoked it.
+pub fn ancestors_of_self(max: usize) -> Vec<u32> {
+    let Ok(mut sys) = System::new() else { return Vec::new() };
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let mut out = Vec::new();
+    let mut cur = sysinfo::Pid::from_u32(std::process::id());
+    while out.len() < max {
+        let Some(parent) = sys.process(cur).and_then(|p| p.parent()) else { break };
+        if parent.as_u32() == 0 || out.contains(&parent.as_u32()) {
+            break;
+        }
+        out.push(parent.as_u32());
+        cur = parent;
+    }
+    out
 }
 
 /// The utility VM that hosts every WSL 2 distribution (Windows 11: VmmemWSL).
@@ -93,14 +150,58 @@ pub fn is_wsl_vm(name: &str) -> bool {
     n == "vmmemwsl" || n == "vmmemwsl.exe"
 }
 
+/// WSL 2 runs if its VM process exists. On Windows 10 the VM is called
+/// `vmmem` (shared with Hyper-V/Sandbox), so it only counts together with a
+/// WSL host-side process.
+pub fn wsl_vm_running(names: &[String]) -> bool {
+    let lower: Vec<String> = names.iter().map(|n| n.to_lowercase().trim_end_matches(".exe").to_string()).collect();
+    let has = |n: &str| lower.iter().any(|x| x == n);
+    has("vmmemwsl") || (has("vmmem") && (has("wslservice") || has("wslhost") || has("wslrelay")))
+}
+
+/// Directory a Codex process works in: `-C <dir>`, `--cd <dir>` or
+/// `--cd=<dir>`, resolved against the OS working directory.
+pub fn codex_cwd(cmd: &[String], os_cwd: Option<&str>) -> Option<String> {
+    let mut it = cmd.iter().skip(1);
+    let mut dir = None;
+    while let Some(a) = it.next() {
+        if a == "-C" || a == "--cd" {
+            dir = it.next().cloned();
+        } else if let Some(d) = a.strip_prefix("--cd=") {
+            dir = Some(d.to_string());
+        }
+    }
+    let dir = dir?;
+    let p = Path::new(&dir);
+    if p.is_absolute() || dir.starts_with('/') || dir.starts_with('\\') {
+        Some(dir)
+    } else {
+        os_cwd.map(|c| Path::new(c).join(p).to_string_lossy().into_owned())
+    }
+}
+
+/// Lexically normalised directory: no `\\?\` prefix, unified separators,
+/// `.` and `..` resolved, no trailing separator, case-folded on Windows.
+pub fn normalize_dir(p: &str) -> String {
+    let p = p.strip_prefix(r"\\?\").unwrap_or(p).replace('\\', "/");
+    let mut parts: Vec<&str> = Vec::new();
+    let absolute = p.starts_with('/');
+    for seg in p.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    let joined = format!("{}{}", if absolute { "/" } else { "" }, parts.join("/"));
+    if cfg!(windows) { joined.to_lowercase() } else { joined }
+}
+
 /// Compares directories the way the OS does (case-insensitive on Windows).
 pub fn same_dir(a: &str, b: &str) -> bool {
-    let norm = |p: &str| {
-        let p = p.replace('\\', "/");
-        let p = p.trim_end_matches('/').to_string();
-        if cfg!(windows) { p.to_lowercase() } else { p }
-    };
-    norm(a) == norm(b)
+    normalize_dir(a) == normalize_dir(b)
 }
 
 /// Maps a process to an agent. Pure, so it is unit-tested on all platforms.
@@ -109,8 +210,17 @@ pub fn classify(name: &str, exe: Option<&Path>, cmd: &[String]) -> Option<(Agent
     let base = base.strip_suffix(".exe").unwrap_or(&base).to_string();
     let exe_s = exe.map(|e| e.to_string_lossy().to_lowercase().replace('\\', "/")).unwrap_or_default();
     let cmd_s = cmd.join(" ").to_lowercase().replace('\\', "/");
-    // Electron/Chromium helper processes (renderer, gpu, utility, crashpad).
-    if cmd_s.contains("--type=") {
+    // Electron/Chromium helper processes (renderer, gpu, utility, crashpad):
+    // a separate argv element, never text inside some other argument.
+    if cmd.iter().skip(1).any(|a| a.starts_with("--type=")) {
+        return None;
+    }
+    // Electron apps re-run their binary in node mode for helpers (language
+    // servers, extension hosts): those are not the editor.
+    let node_mode = cmd.iter().skip(1).any(|a| {
+        a == "--ms-enable-electron-run-as-node" || a.starts_with("--node-ipc") || a.starts_with("--clientProcessId=")
+    });
+    if node_mode && matches!(base.as_str(), "cursor" | "claude") {
         return None;
     }
     match base.as_str() {
@@ -229,6 +339,26 @@ mod tests {
     fn wsl_and_dirs() {
         assert!(is_wsl_vm("VmmemWSL"));
         assert!(!is_wsl_vm("vmmem"));
+        let n = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(wsl_vm_running(&n(&["VmmemWSL"])));
+        assert!(wsl_vm_running(&n(&["vmmem", "wslservice.exe"])), "Windows 10");
+        assert!(!wsl_vm_running(&n(&["vmmem"])), "Hyper-V / Sandbox alone");
+        assert!(same_dir(r"\\?\C:\work\a\..\api\.", "C:/work/api"));
+        let c = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(codex_cwd(&c(&["codex", "-C", "/abs/x"]), Some("/home")).as_deref(), Some("/abs/x"));
+        assert_eq!(
+            codex_cwd(&c(&["codex", "--cd=sub"]), Some("/home")).map(|d| normalize_dir(&d)),
+            Some(normalize_dir("/home/sub"))
+        );
+        assert_eq!(codex_cwd(&c(&["codex"]), Some("/home")), None);
+        assert!(
+            classify("claude", None, &c(&["claude", "-p", "explain the --type=renderer flag"])).is_some(),
+            "text inside a prompt"
+        );
+        assert!(
+            classify("Cursor.exe", None, &c(&["Cursor.exe", "--ms-enable-electron-run-as-node", "x.js"])).is_none()
+        );
+        assert!(classify("Cursor.exe", None, &c(&["Cursor.exe", "C:\\proj"])).is_some());
         assert!(same_dir("/work/api/", "/work/api"));
         if cfg!(windows) {
             assert!(same_dir(r"C:\Work\API", "c:/work/api"));

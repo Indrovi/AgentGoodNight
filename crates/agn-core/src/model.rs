@@ -151,6 +151,17 @@ impl fmt::Display for SessionKey {
     }
 }
 
+/// A pending one-shot continuation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Wakeup {
+    /// When it is due, if known.
+    pub due: Option<Millis>,
+    /// When it was scheduled (it cannot fire within the scheduling turn).
+    pub scheduled_at: Millis,
+    /// Job id, when the tool reported one (one-shot cron jobs).
+    pub id: Option<String>,
+}
+
 /// One tracked agent session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
@@ -182,8 +193,24 @@ pub struct Session {
     pub open_subagents: BTreeSet<String>,
     /// Background tasks (shells, monitors, async agents) not yet finished.
     pub background: BTreeSet<String>,
-    /// A one-shot wake-up was scheduled (cleared by the next turn start).
-    pub wakeup_scheduled: bool,
+    /// One-shot continuations (wake-ups, one-shot cron jobs) that have not
+    /// demonstrably fired yet, each tracked on its own.
+    #[serde(default)]
+    pub wakeups: Vec<Wakeup>,
+    /// Time of the latest evidence of progress (turn start, tool activity).
+    /// End-of-turn evidence older than this belongs to a previous turn.
+    #[serde(default)]
+    pub last_progress: Millis,
+    /// Start time of the process `pid` refers to (pid reuse protection).
+    #[serde(default)]
+    pub pid_start: Option<Millis>,
+    /// Evidence up to this time was already applied in a previous run;
+    /// replays of it (re-reading logs after a restart) change nothing.
+    #[serde(default)]
+    pub replay_until: Millis,
+    /// The latest end of turn was only inferred (not confirmed).
+    #[serde(default)]
+    pub last_end_inferred: bool,
     /// Recurring continuation (cron/loop) — sticky until the session ends.
     pub recurring: bool,
     /// An auto-continuing goal is active.
@@ -216,7 +243,11 @@ impl Session {
             sources: BTreeSet::new(),
             open_subagents: BTreeSet::new(),
             background: BTreeSet::new(),
-            wakeup_scheduled: false,
+            wakeups: Vec::new(),
+            last_progress: 0,
+            pid_start: None,
+            replay_until: 0,
+            last_end_inferred: false,
             recurring: false,
             goal_active: false,
             pending_snapshot_at: None,
@@ -230,7 +261,7 @@ impl Session {
     pub fn has_pending_continuation(&self) -> bool {
         !self.open_subagents.is_empty()
             || !self.background.is_empty()
-            || self.wakeup_scheduled
+            || !self.wakeups.is_empty()
             || self.recurring
             || self.goal_active
     }

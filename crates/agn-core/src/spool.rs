@@ -32,6 +32,10 @@ pub struct SpoolRecord {
     pub received_at: Millis,
     #[serde(default)]
     pub hook_pid: Option<u32>,
+    /// Parent process chain of the hook (nearest first), so the monitor can
+    /// tell which agent process ran it.
+    #[serde(default)]
+    pub ancestors: Vec<u32>,
     pub payload: Value,
 }
 
@@ -42,6 +46,7 @@ impl SpoolRecord {
             agent: agent.to_string(),
             received_at: now_millis(),
             hook_pid: Some(std::process::id()),
+            ancestors: Vec::new(),
             payload: scrub(payload),
         }
     }
@@ -59,7 +64,7 @@ static SEQ: AtomicU32 = AtomicU32::new(0);
 pub fn write_record(dir: &Path, record: &SpoolRecord) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let name = format!("{:013}-{}-{}.json", record.received_at, record.hook_pid.unwrap_or(0), seq);
+    let name = format!("{:013}-{}-{:010}.json", record.received_at, record.hook_pid.unwrap_or(0), seq);
     let tmp = dir.join(format!(".{name}.tmp"));
     let dst = dir.join(&name);
     {

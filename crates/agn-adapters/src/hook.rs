@@ -24,7 +24,9 @@ pub struct HookOutcome {
     pub stored: bool,
 }
 
-pub fn run(agent_arg: Option<&str>, stdin: &mut dyn Read, data_dir: &Path) -> HookOutcome {
+/// `ancestors`: the hook's parent process chain, nearest first, so the
+/// monitor can attribute the record to the agent process that ran it.
+pub fn run(agent_arg: Option<&str>, stdin: &mut dyn Read, data_dir: &Path, ancestors: Vec<u32>) -> HookOutcome {
     let mut raw = Vec::new();
     let read_ok = stdin.take(MAX_STDIN).read_to_end(&mut raw).is_ok();
     let text = String::from_utf8_lossy(&raw);
@@ -44,7 +46,8 @@ pub fn run(agent_arg: Option<&str>, stdin: &mut dyn Read, data_dir: &Path) -> Ho
         log_error(data_dir, &format!("unusable hook input (agent={agent_arg:?}, {} bytes)", raw.len()));
         return HookOutcome { stdout, stored: false };
     };
-    let rec = SpoolRecord::new(agent.id(), payload);
+    let mut rec = SpoolRecord::new(agent.id(), payload);
+    rec.ancestors = ancestors;
     let stored = match write_record(&data_dir.join("spool"), &rec) {
         Ok(_) => true,
         Err(e) => {
@@ -78,12 +81,13 @@ mod tests {
     fn stores_scrubbed_record_silently() {
         let dir = tempfile::tempdir().unwrap();
         let mut input = r#"{"session_id":"s","hook_event_name":"Stop","last_assistant_message":"secret"}"#.as_bytes();
-        let out = run(Some("claude_code"), &mut input, dir.path());
+        let out = run(Some("claude_code"), &mut input, dir.path(), vec![42, 7]);
         assert_eq!(out, HookOutcome { stdout: None, stored: true });
         let batch = read_batch(&dir.path().join("spool")).unwrap();
         let rec = batch[0].record.as_ref().unwrap();
         assert_eq!(rec.agent, "claude_code");
         assert!(rec.payload.get("last_assistant_message").is_none());
+        assert_eq!(rec.ancestors, vec![42, 7]);
     }
 
     #[test]
@@ -91,7 +95,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut input = "\u{feff}{\"conversation_id\":\"c\",\"generation_id\":\"g\",\"hook_event_name\":\"stop\",\"status\":\"completed\"}".as_bytes();
         // Installed for Claude but invoked by Cursor (imported hooks).
-        let out = run(Some("claude_code"), &mut input, dir.path());
+        let out = run(Some("claude_code"), &mut input, dir.path(), vec![]);
         assert_eq!(out.stdout, Some("{}"));
         let batch = read_batch(&dir.path().join("spool")).unwrap();
         assert_eq!(batch[0].record.as_ref().unwrap().agent, "cursor");
@@ -101,10 +105,10 @@ mod tests {
     fn garbage_is_logged_not_stored() {
         let dir = tempfile::tempdir().unwrap();
         let mut input = "not json".as_bytes();
-        let out = run(Some("gemini_cli"), &mut input, dir.path());
+        let out = run(Some("gemini_cli"), &mut input, dir.path(), vec![]);
         assert!(!out.stored);
         assert!(dir.path().join("logs/hook-errors.log").exists());
         let mut input = "{}".as_bytes();
-        assert!(!run(None, &mut input, dir.path()).stored, "unknown agent");
+        assert!(!run(None, &mut input, dir.path(), vec![]).stored, "unknown agent");
     }
 }

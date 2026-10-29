@@ -20,7 +20,7 @@ use agn_core::model::{AgentKind, EvidenceSource};
 use agn_core::time::{Millis, parse_rfc3339_millis};
 use serde_json::Value;
 
-use crate::tail::{FileTail, for_each_zstd_line, last_line_containing, mtime_millis};
+use crate::tail::{FileTail, MtimeCache, TailState, for_each_zstd_line, last_line_containing, mtime_millis};
 use crate::{SourceStatus, str_field};
 
 const AGENT: AgentKind = AgentKind::Codex;
@@ -40,19 +40,49 @@ struct Rollout {
     parser: RolloutParser,
 }
 
+/// What a rollout reader needs to continue after a restart.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RolloutSave {
+    pub path: PathBuf,
+    pub tail: TailState,
+    pub parser: RolloutParser,
+}
+
 pub struct CodexAdapter {
     root: PathBuf,
     window: Millis,
     rollouts: BTreeMap<PathBuf, Rollout>,
+    mtimes: MtimeCache,
 }
 
 impl CodexAdapter {
     pub fn new(root: PathBuf, window: Millis) -> Self {
-        Self { root, window, rollouts: BTreeMap::new() }
+        Self { root, window, rollouts: BTreeMap::new(), mtimes: MtimeCache::default() }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn export(&self) -> Vec<RolloutSave> {
+        self.rollouts
+            .iter()
+            .filter_map(|(path, r)| {
+                Some(RolloutSave { path: path.clone(), tail: r.tail.state()?, parser: r.parser.clone() })
+            })
+            .collect()
+    }
+
+    pub fn import(&mut self, saved: Vec<RolloutSave>) {
+        for s in saved {
+            if !s.path.is_file() {
+                continue;
+            }
+            let tail = FileTail::resume(s.path.clone(), &s.tail);
+            let mut parser = s.parser;
+            parser.started = tail.is_started();
+            self.rollouts.insert(s.path, Rollout { tail, parser });
+        }
     }
 
     pub fn poll(&mut self, now: Millis, full: bool) -> (Vec<AgentEvent>, SourceStatus) {
@@ -68,8 +98,14 @@ impl CodexAdapter {
                     status = SourceStatus::ReadError(e.to_string());
                 }
             }
-            for (path, mtime) in found {
-                if now - mtime > self.window || self.rollouts.contains_key(&path) {
+            for (path, listed) in found {
+                if self.rollouts.contains_key(&path) {
+                    continue;
+                }
+                // A resumed old thread is written to its old file; on Windows
+                // the listing may still show the old mtime.
+                let mtime = self.mtimes.accurate(&path, listed, now, self.window);
+                if now - mtime > self.window {
                     continue;
                 }
                 // A plain file superseded by its compressed twin (or vice
@@ -172,7 +208,7 @@ fn read_first_line(path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&buf[..end]).into_owned())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RolloutParser {
     started: bool,
     session_id: String,

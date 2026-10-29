@@ -22,7 +22,7 @@ use agn_core::spool::SpoolRecord;
 use agn_core::time::{HOUR, Millis, parse_rfc3339_millis};
 use serde_json::Value;
 
-use crate::tail::{FileTail, list_files, mtime_millis, newest_mtime};
+use crate::tail::{FileTail, MtimeCache, TailState, list_files, mtime_millis, newest_mtime};
 use crate::{SourceStatus, str_field};
 
 const AGENT: AgentKind = AgentKind::ClaudeCode;
@@ -51,6 +51,16 @@ pub struct RegistryEntry {
     pub status: Option<String>,
 }
 
+/// What a transcript reader needs to continue after a restart.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TranscriptSave {
+    pub path: PathBuf,
+    pub session_id: String,
+    pub tail: TailState,
+    pub sub_mtime: Option<Millis>,
+    pub parser: LineParser,
+}
+
 #[derive(Debug)]
 struct Transcript {
     tail: FileTail,
@@ -66,11 +76,94 @@ pub struct ClaudeAdapter {
     window: Millis,
     transcripts: BTreeMap<PathBuf, Transcript>,
     registry: Vec<RegistryEntry>,
+    /// The last registry read was complete (no unreadable files).
+    registry_ok: bool,
+    mtimes: MtimeCache,
 }
 
 impl ClaudeAdapter {
     pub fn new(root: PathBuf, window: Millis) -> Self {
-        Self { root, window, transcripts: BTreeMap::new(), registry: Vec::new() }
+        Self {
+            root,
+            window,
+            transcripts: BTreeMap::new(),
+            registry: Vec::new(),
+            registry_ok: false,
+            mtimes: MtimeCache::default(),
+        }
+    }
+
+    /// Whether the last registry read had no unreadable or partial files.
+    pub fn registry_ok(&self) -> bool {
+        self.registry_ok
+    }
+
+    /// Reading positions and parser state of every tracked transcript.
+    pub fn export(&self) -> Vec<TranscriptSave> {
+        self.transcripts
+            .iter()
+            .filter_map(|(path, t)| {
+                Some(TranscriptSave {
+                    path: path.clone(),
+                    session_id: t.session_id.clone(),
+                    tail: t.tail.state()?,
+                    sub_mtime: t.sub_mtime,
+                    parser: t.parser.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Continues reading saved transcripts where the previous run stopped.
+    pub fn import(&mut self, saved: Vec<TranscriptSave>) {
+        for s in saved {
+            if !s.path.is_file() {
+                continue;
+            }
+            let tail = FileTail::resume(s.path.clone(), &s.tail);
+            let mut parser = s.parser;
+            parser.started = tail.is_started();
+            let Some(dir) = s.path.parent().map(Path::to_path_buf) else { continue };
+            let sub_dir = dir.join(&s.session_id).join("subagents");
+            self.transcripts
+                .insert(s.path, Transcript { tail, session_id: s.session_id, sub_dir, sub_mtime: s.sub_mtime, parser });
+        }
+    }
+
+    /// Whether a transcript for this session exists on disk.
+    pub fn has_transcript(&self, session_id: &str) -> bool {
+        self.transcripts.values().any(|t| t.session_id == session_id) || self.find_transcript(session_id).is_some()
+    }
+
+    fn find_transcript(&self, session_id: &str) -> Option<PathBuf> {
+        let name = format!("{session_id}.jsonl");
+        fs::read_dir(self.root.join("projects")).ok()?.flatten().map(|d| d.path().join(&name)).find(|p| p.is_file())
+    }
+
+    /// Longest configured Stop-hook timeout (ms) in the user settings and the
+    /// project settings of tracked sessions; `None` when none is configured.
+    /// Every directory a tracked session worked in (project settings may
+    /// live in any of them), plus plugin hook files and managed settings.
+    pub fn max_stop_hook_timeout(&self) -> Option<Millis> {
+        let mut files = vec![self.root.join("settings.json"), self.root.join("settings.local.json")];
+        let mut cwds: BTreeSet<String> = BTreeSet::new();
+        for t in self.transcripts.values() {
+            cwds.extend(t.parser.cwds.iter().cloned());
+        }
+        cwds.extend(self.registry.iter().filter_map(|e| e.cwd.clone()));
+        for cwd in cwds {
+            // The project root may be any ancestor of a working directory.
+            for dir in Path::new(&cwd).ancestors().take(8) {
+                files.push(dir.join(".claude").join("settings.json"));
+                files.push(dir.join(".claude").join("settings.local.json"));
+            }
+        }
+        let mut budget = 4_000;
+        find_named(&self.root.join("plugins"), "hooks.json", 7, &mut budget, &mut files);
+        files.extend(managed_settings_paths());
+        files.sort();
+        files.dedup();
+        files.iter().filter_map(|f| stop_hook_timeout(f)).max()
     }
 
     pub fn root(&self) -> &Path {
@@ -95,7 +188,29 @@ impl ClaudeAdapter {
                     status = SourceStatus::ReadError(e.to_string());
                 }
             }
-            self.registry = read_registry(&self.root.join("sessions"));
+            let (mut entries, unreadable) = read_registry(&self.root.join("sessions"));
+            // A file being rewritten right now must not make its process
+            // look unregistered: keep what we knew about that pid.
+            for pid in &unreadable {
+                if let Some(old) = self.registry.iter().find(|e| e.pid == *pid) {
+                    entries.push(old.clone());
+                }
+            }
+            self.registry_ok = unreadable.is_empty();
+            self.registry = entries;
+            // Live sessions are tracked regardless of how old their
+            // transcript is (a background job may outlive the window).
+            let wanted: Vec<String> = self
+                .registry
+                .iter()
+                .map(|e| e.session_id.clone())
+                .filter(|sid| !self.transcripts.values().any(|t| &t.session_id == sid))
+                .collect();
+            for sid in wanted {
+                if let Some(path) = self.find_transcript(&sid) {
+                    self.track(path, sid);
+                }
+            }
         }
         let mut events = Vec::new();
         for (path, t) in self.transcripts.iter_mut() {
@@ -114,11 +229,7 @@ impl ClaudeAdapter {
                         // session from completing until a Stop hook reports
                         // the authoritative pending work.
                         let earliest = events[start..].iter().map(|e| e.at).min().unwrap_or(read.mtime);
-                        events.push(t.parser.event(
-                            &t.session_id,
-                            earliest - 1,
-                            EventKind::BackgroundStarted { id: agn_core::tracker::HISTORY_UNKNOWN.into() },
-                        ));
+                        events.push(t.parser.event(&t.session_id, earliest - 1, EventKind::HistoryUnknown));
                         if let Some(ev) = scan_last_goal(path, &t.session_id) {
                             events.push(ev);
                         }
@@ -133,7 +244,9 @@ impl ClaudeAdapter {
             if full {
                 let mut budget = 5_000;
                 if let Some(m) = newest_mtime(&t.sub_dir, 4, &mut budget) {
-                    if t.sub_mtime.is_none_or(|old| m > old) {
+                    // "Changed", not "newer": a clock that went backwards must
+                    // not hide later writes.
+                    if t.sub_mtime.is_none_or(|old| m != old) {
                         let first_seen = t.sub_mtime.is_none();
                         t.sub_mtime = Some(m);
                         // Background agents/workflows wrote after we last
@@ -149,10 +262,31 @@ impl ClaudeAdapter {
                 }
             }
         }
-        // Forget transcripts that have been quiet for long.
+        // Forget transcripts that have been quiet for long, unless their
+        // process is still registered.
         let horizon = now - self.window * 2;
-        self.transcripts.retain(|_, t| t.tail.mtime() == 0 || t.tail.mtime() >= horizon);
+        let live: BTreeSet<&str> = self.registry.iter().map(|e| e.session_id.as_str()).collect();
+        self.transcripts
+            .retain(|_, t| t.tail.mtime() == 0 || t.tail.mtime() >= horizon || live.contains(t.session_id.as_str()));
         (events, status)
+    }
+
+    fn track(&mut self, path: PathBuf, session_id: String) {
+        if self.transcripts.contains_key(&path) {
+            return;
+        }
+        let Some(dir) = path.parent().map(Path::to_path_buf) else { return };
+        let sub_dir = dir.join(&session_id).join("subagents");
+        self.transcripts.insert(
+            path.clone(),
+            Transcript {
+                tail: FileTail::new(path),
+                session_id,
+                sub_dir,
+                sub_mtime: None,
+                parser: LineParser::default(),
+            },
+        );
     }
 
     fn discover(&mut self, projects: &Path, now: Millis) -> std::io::Result<()> {
@@ -165,23 +299,19 @@ impl ClaudeAdapter {
                 Err(_) => continue,
             };
             for (path, meta) in files {
-                if self.transcripts.contains_key(&path) || now - mtime_millis(&meta) > self.window {
+                if self.transcripts.contains_key(&path) {
+                    continue;
+                }
+                // Directory listings can report a stale mtime for files that
+                // are being written (Windows); re-check old-looking ones.
+                let mtime = self.mtimes.accurate(&path, mtime_millis(&meta), now, self.window);
+                if now - mtime > self.window {
                     continue;
                 }
                 let Some(session_id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
                     continue;
                 };
-                let sub_dir = dir.path().join(&session_id).join("subagents");
-                self.transcripts.insert(
-                    path.clone(),
-                    Transcript {
-                        tail: FileTail::new(path),
-                        session_id,
-                        sub_dir,
-                        sub_mtime: None,
-                        parser: LineParser::default(),
-                    },
-                );
+                self.track(path, session_id);
             }
         }
         Ok(())
@@ -197,29 +327,49 @@ fn scan_last_goal(path: &Path, session_id: &str) -> Option<AgentEvent> {
     f.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::new();
     f.take(GOAL_SCAN_WINDOW).read_to_end(&mut buf).ok()?;
-    let needle = b"\"goal_status\"";
-    let pos = buf.windows(needle.len()).rposition(|w| w == needle)?;
+    // Whichever comes last wins: a goal_status attachment or a "/goal clear".
+    let last = |needle: &[u8]| buf.windows(needle.len()).rposition(|w| w == needle);
+    let status_pos = last(b"\"goal_status\"");
+    let command_pos = last(b"<command-name>/goal</command-name>");
+    let pos = match (status_pos, command_pos) {
+        (Some(a), Some(b)) => a.max(b),
+        (Some(a), None) | (None, Some(a)) => a,
+        (None, None) => return None,
+    };
     let line_start = buf[..pos].iter().rposition(|b| *b == b'\n').map_or(0, |p| p + 1);
     let line_end = buf[pos..].iter().position(|b| *b == b'\n').map_or(buf.len(), |p| pos + p);
     let v: Value = serde_json::from_slice(&buf[line_start..line_end]).ok()?;
-    let att = v.get("attachment")?;
-    if str_field(att, "type") != Some("goal_status") {
-        return None;
-    }
     let at = v.get("timestamp").and_then(Value::as_str).and_then(parse_rfc3339_millis)?;
-    let met = att.get("met").and_then(Value::as_bool).unwrap_or(false);
-    Some(AgentEvent::new(AGENT, session_id, at, EventKind::GoalStatus { active: !met }, EvidenceSource::Transcript))
+    let active = if let Some(att) = v.get("attachment").filter(|a| str_field(a, "type") == Some("goal_status")) {
+        !att.get("met").and_then(Value::as_bool).unwrap_or(false)
+    } else {
+        let text = content_texts(v.get("message").and_then(|m| m.get("content"))).join("\n");
+        let args = between(&text, "<command-args>", "</command-args>").unwrap_or("").trim().to_string();
+        if !args.eq_ignore_ascii_case("clear") {
+            return None; // a new goal is followed by its goal_status attachment
+        }
+        false
+    };
+    Some(AgentEvent::new(AGENT, session_id, at, EventKind::GoalStatus { active }, EvidenceSource::Transcript))
 }
 
-pub fn read_registry(dir: &Path) -> Vec<RegistryEntry> {
-    let Ok(files) = list_files(dir, |n| n.ends_with(".json")) else { return Vec::new() };
+/// Reads `sessions/<pid>.json`. Returns the entries and the pids (from the
+/// file names) of files that could not be read or parsed right now.
+pub fn read_registry(dir: &Path) -> (Vec<RegistryEntry>, Vec<u32>) {
+    let Ok(files) = list_files(dir, |n| n.ends_with(".json")) else { return (Vec::new(), Vec::new()) };
     let mut out = Vec::new();
+    let mut unreadable = Vec::new();
     for (path, _) in files {
-        let Ok(bytes) = fs::read(&path) else { continue };
-        let Ok(v) = serde_json::from_slice::<Value>(&bytes) else { continue };
+        let file_pid = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.parse::<u32>().ok());
+        let parsed = fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        let Some(v) = parsed else {
+            unreadable.extend(file_pid);
+            continue;
+        };
         let (Some(pid), Some(session_id)) =
             (v.get("pid").and_then(Value::as_u64), v.get("sessionId").and_then(Value::as_str))
         else {
+            unreadable.extend(file_pid);
             continue;
         };
         out.push(RegistryEntry {
@@ -231,7 +381,62 @@ pub fn read_registry(dir: &Path) -> Vec<RegistryEntry> {
             status: str_field(&v, "status").map(str::to_string),
         });
     }
-    out
+    (out, unreadable)
+}
+
+/// Files named `name` below `dir`, bounded in depth and entries.
+fn find_named(dir: &Path, name: &str, depth: usize, budget: &mut usize, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        let p = e.path();
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            if depth > 0 {
+                find_named(&p, name, depth - 1, budget, out);
+            }
+        } else if e.file_name() == name {
+            out.push(p);
+        }
+    }
+}
+
+/// Enterprise-managed Claude Code settings locations.
+fn managed_settings_paths() -> Vec<PathBuf> {
+    if cfg!(windows) {
+        let base =
+            std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+        vec![base.join("ClaudeCode").join("managed-settings.json")]
+    } else if cfg!(target_os = "macos") {
+        vec![PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json")]
+    } else {
+        vec![PathBuf::from("/etc/claude-code/managed-settings.json")]
+    }
+}
+
+/// Longest Stop-hook timeout configured in a Claude settings file, ms.
+/// Command hooks without an explicit timeout use Claude Code's default 600 s.
+fn stop_hook_timeout(path: &Path) -> Option<Millis> {
+    let v: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    let groups = v.get("hooks")?.get("Stop")?.as_array()?;
+    let mut max = None;
+    for g in groups {
+        for h in g.get("hooks").and_then(Value::as_array).into_iter().flatten() {
+            if h.get("async").and_then(Value::as_bool).unwrap_or(false) {
+                continue;
+            }
+            let secs = h.get("timeout").and_then(Value::as_f64).unwrap_or(match str_field(h, "type") {
+                Some("prompt") => 30.0,
+                Some("agent") => 60.0,
+                _ => 600.0,
+            });
+            let ms = (secs * 1000.0) as Millis;
+            max = Some(max.map_or(ms, |m: Millis| m.max(ms)));
+        }
+    }
+    max
 }
 
 pub fn origin_from_entrypoint(ep: &str) -> String {
@@ -244,7 +449,8 @@ pub fn origin_from_entrypoint(ep: &str) -> String {
 
 /// Stateful transcript line parser (remembers background tool launches
 /// until their results arrive).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct LineParser {
     started: bool,
     cwd: Option<String>,
@@ -252,8 +458,16 @@ pub struct LineParser {
     /// tool_use id -> tool name, for launches that may run in background.
     bg_candidates: BTreeMap<String, String>,
     seen_task_ids: BTreeSet<String>,
-    /// Recurring crons created within the observed part of the transcript.
-    crons: u32,
+    /// CronCreate tool_use id -> recurring, until its result names the job.
+    cron_creates: BTreeMap<String, bool>,
+    /// CronDelete tool_use id -> job id it targets.
+    cron_deletes: BTreeMap<String, String>,
+    /// Recurring jobs whose ids we know.
+    recurring_jobs: BTreeSet<String>,
+    /// Recurring jobs created without an id we could read: never cancelled.
+    unmatched_recurring: u32,
+    /// Every working directory seen (project settings lookup).
+    cwds: BTreeSet<String>,
 }
 
 const TERMINAL_TASK_STATUS: &[&str] = &[
@@ -272,6 +486,11 @@ const TERMINAL_TASK_STATUS: &[&str] = &[
 ];
 
 impl LineParser {
+    /// No recurring cron is known, pending creation or of unknown id.
+    fn no_recurring_left(&self) -> bool {
+        self.recurring_jobs.is_empty() && self.unmatched_recurring == 0 && !self.cron_creates.values().any(|r| *r)
+    }
+
     fn event(&self, session_id: &str, at: Millis, kind: EventKind) -> AgentEvent {
         AgentEvent::new(AGENT, session_id, at, kind, EvidenceSource::Transcript)
             .with_cwd(self.cwd.clone())
@@ -282,6 +501,9 @@ impl LineParser {
         let Ok(v) = serde_json::from_str::<Value>(line) else { return };
         if let Some(cwd) = str_field(&v, "cwd") {
             self.cwd = Some(cwd.to_string());
+            if self.cwds.len() < 32 {
+                self.cwds.insert(cwd.to_string());
+            }
         }
         if let Some(ep) = str_field(&v, "entrypoint") {
             self.origin = Some(origin_from_entrypoint(ep));
@@ -293,7 +515,7 @@ impl LineParser {
         let mut push = |kind: EventKind| kinds.push(kind);
         match str_field(&v, "type").unwrap_or("") {
             "user" => kinds = self.user_entry(&v),
-            "assistant" => kinds = self.assistant_entry(&v),
+            "assistant" => kinds = self.assistant_entry(&v, at),
             "system" => match str_field(&v, "subtype").unwrap_or("") {
                 "stop_hook_summary" => {
                     if v.get("preventedContinuation").and_then(Value::as_bool).unwrap_or(false) {
@@ -372,9 +594,49 @@ impl LineParser {
                     continue;
                 }
                 let Some(id) = str_field(item, "tool_use_id") else { continue };
+                let is_error = item.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                let structured = v.get("toolUseResult");
+                if let Some(recurring) = self.cron_creates.remove(id) {
+                    let text = content_texts(item.get("content")).join("\n");
+                    let job = if is_error { None } else { job_id(structured, &text) };
+                    if recurring {
+                        match (is_error, job) {
+                            (false, Some(job)) => {
+                                self.recurring_jobs.insert(job);
+                                // (Re-)assert: a parallel delete may have just
+                                // cleared the flag.
+                                kinds.push(EventKind::ContinuationScheduled { recurring: true, due: None });
+                            }
+                            (false, None) => self.unmatched_recurring += 1,
+                            (true, _) => {}
+                        }
+                    } else {
+                        let pending = format!("pending:{id}");
+                        match (is_error, job) {
+                            (true, _) => kinds.push(EventKind::OneShotCancelled { id: pending }),
+                            (false, Some(job)) => {
+                                kinds.push(EventKind::OneShotScheduled { id: job });
+                                kinds.push(EventKind::OneShotCancelled { id: pending });
+                            }
+                            // Scheduled, but we cannot tell when it is gone: stays.
+                            (false, None) => {}
+                        }
+                    }
+                    if self.no_recurring_left() {
+                        kinds.push(EventKind::ContinuationCancelled);
+                    }
+                }
+                if let Some(target) = self.cron_deletes.remove(id) {
+                    if !is_error {
+                        self.recurring_jobs.remove(&target);
+                        kinds.push(EventKind::OneShotCancelled { id: target });
+                        if self.no_recurring_left() {
+                            kinds.push(EventKind::ContinuationCancelled);
+                        }
+                    }
+                }
                 if let Some(tool) = self.bg_candidates.remove(id) {
                     let text = content_texts(item.get("content")).join("\n");
-                    let structured = v.get("toolUseResult");
                     if let Some(task) = background_id(&tool, &text, structured) {
                         if !self.seen_task_ids.contains(&task) {
                             kinds.push(EventKind::BackgroundStarted { id: task });
@@ -390,6 +652,11 @@ impl LineParser {
 
         let joined = texts.join("\n");
         let origin = str_field(v, "turnOrigin").unwrap_or("");
+        if origin == "scheduled" {
+            kinds.push(EventKind::ContinuationFired);
+            kinds.push(EventKind::TurnStarted);
+            return kinds;
+        }
         let is_notification = origin == "task_notification"
             || v.get("origin").and_then(|o| str_field(o, "kind")) == Some("task-notification")
             || joined.contains("<task-notification>");
@@ -419,11 +686,19 @@ impl LineParser {
             kinds.push(EventKind::Heartbeat);
             return kinds;
         }
+        if joined.contains("<command-name>/clear</command-name>") {
+            kinds.push(EventKind::SessionStarted { source: Some("clear".into()) });
+            return kinds;
+        }
         let is_meta = v.get("isMeta").and_then(Value::as_bool).unwrap_or(false);
         let local = joined.contains("<local-command-stdout>")
             || joined.contains("<local-command-stderr>")
             || joined.contains("<command-name>")
-            || joined.contains("<local-command-caveat>");
+            || joined.contains("<local-command-caveat>")
+            // Bash mode ("! cmd") runs a shell command, not a model turn.
+            || joined.contains("<bash-input>")
+            || joined.contains("<bash-stdout>")
+            || joined.contains("<bash-stderr>");
         if is_meta || local || texts.is_empty() {
             kinds.push(EventKind::Heartbeat);
         } else {
@@ -432,7 +707,7 @@ impl LineParser {
         kinds
     }
 
-    fn assistant_entry(&mut self, v: &Value) -> Vec<EventKind> {
+    fn assistant_entry(&mut self, v: &Value, at: Millis) -> Vec<EventKind> {
         let mut kinds = Vec::new();
         if v.get("isApiErrorMessage").and_then(Value::as_bool).unwrap_or(false) {
             let err = str_field(v, "error").unwrap_or("");
@@ -446,7 +721,7 @@ impl LineParser {
                 .get("quotaLimits")
                 .and_then(|q| q.get("resetsAt"))
                 .and_then(Value::as_i64)
-                .map(|s| if s < 100_000_000_000 { s * 1000 } else { s });
+                .map(|s| if s < 100_000_000_000 { s.saturating_mul(1000) } else { s });
             let kind = if limited { FailureKind::RateLimited } else { FailureKind::Error };
             let reason = v
                 .get("quotaLimits")
@@ -470,20 +745,33 @@ impl LineParser {
             match name.as_str() {
                 "ScheduleWakeup" => {
                     if !input.get("stop").and_then(Value::as_bool).unwrap_or(false) {
-                        kinds.push(EventKind::ContinuationScheduled { recurring: false });
+                        kinds.push(EventKind::ContinuationScheduled { recurring: false, due: wakeup_due(&input, at) });
                     }
                 }
                 "CronCreate" => {
                     let recurring = input.get("recurring").and_then(Value::as_bool).unwrap_or(true);
                     if recurring {
-                        self.crons += 1;
+                        if id.is_empty() {
+                            self.unmatched_recurring += 1;
+                        } else {
+                            self.cron_creates.insert(id.clone(), true);
+                        }
+                        kinds.push(EventKind::ContinuationScheduled { recurring: true, due: None });
+                    } else {
+                        // A one-shot cron (its due time is a cron expression):
+                        // pending under the call id until the result names it.
+                        let pending = if id.is_empty() { "oneshot:anon".to_string() } else { format!("pending:{id}") };
+                        if !id.is_empty() {
+                            self.cron_creates.insert(id.clone(), false);
+                        }
+                        kinds.push(EventKind::OneShotScheduled { id: pending });
                     }
-                    kinds.push(EventKind::ContinuationScheduled { recurring });
                 }
-                "CronDelete" if self.crons > 0 => {
-                    self.crons -= 1;
-                    if self.crons == 0 {
-                        kinds.push(EventKind::ContinuationCancelled);
+                "CronDelete" => {
+                    if let Some(target) = job_id(Some(&input), "") {
+                        if !id.is_empty() {
+                            self.cron_deletes.insert(id.clone(), target);
+                        }
                     }
                 }
                 _ => {}
@@ -508,7 +796,7 @@ impl LineParser {
         let synthetic = message.and_then(|m| str_field(m, "model")) == Some("<synthetic>");
         let used_tool = items.into_iter().flatten().any(|i| str_field(i, "type") == Some("tool_use"));
         if stop_reason == Some("end_turn") && !synthetic && !used_tool {
-            kinds.push(EventKind::TurnEndInferred);
+            kinds.push(EventKind::TurnEndInferred { pending: None });
         }
         kinds
     }
@@ -559,6 +847,29 @@ pub fn task_notifications(text: &str) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// Due time of a ScheduleWakeup call (`delaySeconds` after it was made).
+fn wakeup_due(input: &Value, at: Millis) -> Option<Millis> {
+    let secs = input.get("delaySeconds").and_then(Value::as_f64)?;
+    (secs.is_finite() && secs >= 0.0).then(|| at.saturating_add((secs * 1000.0) as Millis))
+}
+
+/// Job id from a cron tool's structured input/result, or its result text.
+fn job_id(structured: Option<&Value>, text: &str) -> Option<String> {
+    if let Some(s) = structured.filter(|s| s.is_object()) {
+        for k in ["id", "jobId", "job_id", "cronId", "cron_id", "taskId", "task_id"] {
+            if let Some(id) = s.get(k).and_then(Value::as_str).filter(|id| !id.is_empty()) {
+                return Some(id.to_string());
+            }
+        }
+    }
+    for marker in ["job ID:", "Job ID:", "job id:", "jobId:", "ID:"] {
+        if let Some(id) = ident_after(text, marker) {
+            return Some(id.to_string());
+        }
+    }
+    None
 }
 
 fn ident_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
@@ -619,17 +930,21 @@ pub fn hook_events(rec: &SpoolRecord) -> Vec<AgentEvent> {
     match name {
         "SessionStart" => kinds.push(EventKind::SessionStarted { source: str_field(p, "source").map(str::to_string) }),
         "UserPromptSubmit" | "UserPromptExpansion" => kinds.push(EventKind::TurnStarted),
-        "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PostToolBatch" | "PermissionDenied"
-        | "ElicitationResult" | "SubagentStart" | "TaskCreated" | "TaskCompleted" => {
+        // Installed as async hooks: their records can be written after the
+        // Stop record, so they must never revive a finished turn.
+        "PostToolUse" | "SubagentStart" => kinds.push(EventKind::Heartbeat),
+        "PreToolUse" | "PostToolUseFailure" | "PostToolBatch" | "PermissionDenied" | "ElicitationResult"
+        | "TaskCreated" | "TaskCompleted" => {
             let tool = str_field(p, "tool_name").unwrap_or(name);
             if name == "PreToolUse" {
                 let input = p.get("tool_input").cloned().unwrap_or(Value::Null);
                 match tool {
                     "ScheduleWakeup" if !input.get("stop").and_then(Value::as_bool).unwrap_or(false) => {
-                        kinds.push(EventKind::ContinuationScheduled { recurring: false })
+                        kinds.push(EventKind::ContinuationScheduled { recurring: false, due: wakeup_due(&input, at) })
                     }
                     "CronCreate" => kinds.push(EventKind::ContinuationScheduled {
                         recurring: input.get("recurring").and_then(Value::as_bool).unwrap_or(true),
+                        due: None,
                     }),
                     _ => {}
                 }
@@ -658,10 +973,11 @@ pub fn hook_events(rec: &SpoolRecord) -> Vec<AgentEvent> {
                 _ => kinds.push(EventKind::Heartbeat),
             }
         }
-        "Stop" => {
-            let continuing = p.get("stop_hook_active").and_then(Value::as_bool).unwrap_or(false);
-            kinds.push(EventKind::TurnCompleted { continuing, pending: pending_from_stop(p) });
-        }
+        // Our Stop hook runs alongside the user's other Stop hooks, which
+        // may still block. It only reports pending work and an unconfirmed
+        // end; the transcript's stop_hook_summary (written after every Stop
+        // hook returned) confirms.
+        "Stop" => kinds.push(EventKind::TurnEndInferred { pending: pending_from_stop(p) }),
         "StopFailure" => {
             let err = str_field(p, "error").unwrap_or("unknown");
             let kind = if err == "rate_limit" { FailureKind::RateLimited } else { FailureKind::Error };
@@ -878,8 +1194,9 @@ mod tests {
             json!({"type":"assistant","timestamp":ts(3),"message":{"content":[{"type":"tool_use","id":"c","name":"CronCreate","input":{"cron":"*/5 * * * *"}}]}}),
         ];
         let k = kinds(&parse_all(&lines));
-        assert!(k.contains(&EventKind::ContinuationScheduled { recurring: false }));
-        assert!(k.contains(&EventKind::ContinuationScheduled { recurring: true }));
+        let due = parse_rfc3339_millis(&ts(2)).unwrap() + 1_200_000;
+        assert!(k.contains(&EventKind::ContinuationScheduled { recurring: false, due: Some(due) }));
+        assert!(k.contains(&EventKind::ContinuationScheduled { recurring: true, due: None }));
     }
 
     #[test]
@@ -915,15 +1232,15 @@ mod tests {
                 "session_crons":[{"id":"c1","recurring":false}]}),
         );
         let evs = hook_events(&rec);
+        // Unconfirmed end (sibling Stop hooks may still run) + authoritative snapshot.
         assert_eq!(
             evs[0].kind,
-            EventKind::TurnCompleted {
-                continuing: false,
+            EventKind::TurnEndInferred {
                 pending: Some(PendingWork { background: vec!["t1".into()], wakeup: true, recurring: false })
             }
         );
         let old = SpoolRecord::new("claude_code", json!({"session_id":"s","hook_event_name":"Stop"}));
-        assert_eq!(hook_events(&old)[0].kind, EventKind::TurnCompleted { continuing: false, pending: None });
+        assert_eq!(hook_events(&old)[0].kind, EventKind::TurnEndInferred { pending: None });
     }
 
     #[test]
@@ -963,7 +1280,7 @@ mod tests {
         let k = mk(
             json!({"session_id":"s","hook_event_name":"PreToolUse","tool_name":"ScheduleWakeup","tool_input":{"delaySeconds":60}}),
         );
-        assert_eq!(k[0], EventKind::ContinuationScheduled { recurring: false });
+        assert!(matches!(k[0], EventKind::ContinuationScheduled { recurring: false, due: Some(_) }));
     }
 
     #[test]
@@ -1047,5 +1364,92 @@ mod notification_tests {
         let s = t.get(&agn_core::SessionKey::new(AGENT, "s")).unwrap();
         assert!(s.background.is_empty(), "{:?}", s.background);
         assert_eq!(s.state, SessionState::Completed);
+    }
+}
+
+#[cfg(test)]
+mod review_round2_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ts(sec: u32) -> String {
+        format!("2026-10-29T12:00:{sec:02}.000Z")
+    }
+
+    #[test]
+    fn goal_scan_honours_a_later_goal_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        let lines = [
+            json!({"type":"attachment","timestamp":ts(1),"attachment":{"type":"goal_status","met":false}}),
+            json!({"type":"user","timestamp":ts(2),"message":{"content":"<command-name>/goal</command-name><command-args>clear</command-args>"}}),
+        ];
+        fs::write(&p, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        let ev = scan_last_goal(&p, "s").unwrap();
+        assert_eq!(ev.kind, EventKind::GoalStatus { active: false });
+        // And the other way round: a goal set after an earlier clear.
+        let lines = [
+            lines[1].clone(),
+            json!({"type":"attachment","timestamp":ts(3),"attachment":{"type":"goal_status","met":false}}),
+        ];
+        fs::write(&p, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        assert_eq!(scan_last_goal(&p, "s").unwrap().kind, EventKind::GoalStatus { active: true });
+    }
+
+    #[test]
+    fn async_hook_records_never_revive() {
+        for name in ["PostToolUse", "SubagentStart"] {
+            let rec =
+                SpoolRecord::new("claude_code", json!({"session_id":"s","hook_event_name":name,"tool_name":"Bash"}));
+            assert_eq!(hook_events(&rec)[0].kind, EventKind::Heartbeat, "{name}");
+        }
+    }
+
+    #[test]
+    fn stop_hook_timeouts_are_read_from_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("settings.json");
+        fs::write(
+            &f,
+            json!({"hooks":{"Stop":[{"hooks":[
+                {"type":"command","command":"slow-tests","timeout":1800},
+                {"type":"command","command":"quick","async":true,"timeout":9999},
+                {"type":"command","command":"default"}
+            ]}]}})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(stop_hook_timeout(&f), Some(1_800_000));
+        let a = ClaudeAdapter::new(dir.path().to_path_buf(), HOUR);
+        assert_eq!(a.max_stop_hook_timeout(), Some(1_800_000));
+        fs::write(&f, b"{}").unwrap();
+        assert_eq!(stop_hook_timeout(&f), None);
+    }
+
+    #[test]
+    fn unreadable_registry_files_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("123.json"), json!({"pid":123,"sessionId":"a"}).to_string()).unwrap();
+        fs::write(dir.path().join("456.json"), b"{\"pid\": 4").unwrap();
+        let (entries, unreadable) = read_registry(dir.path());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(unreadable, vec![456]);
+    }
+
+    #[test]
+    fn cron_ids_are_matched_before_cancelling() {
+        let mut p = LineParser::default();
+        let mut out = Vec::new();
+        let lines = [
+            // A recurring cron whose id we cannot read is never cancelled.
+            json!({"type":"assistant","timestamp":ts(1),"message":{"content":[{"type":"tool_use","id":"c1","name":"CronCreate","input":{}}]}}),
+            json!({"type":"user","timestamp":ts(2),"message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"ok"}]}}),
+            json!({"type":"assistant","timestamp":ts(3),"message":{"content":[{"type":"tool_use","id":"d1","name":"CronDelete","input":{"id":"whatever"}}]}}),
+            json!({"type":"user","timestamp":ts(4),"message":{"content":[{"type":"tool_result","tool_use_id":"d1","content":"Deleted"}]}}),
+        ];
+        for l in &lines {
+            p.parse("s", &l.to_string(), &mut out);
+        }
+        assert!(!out.iter().any(|e| e.kind == EventKind::ContinuationCancelled));
     }
 }

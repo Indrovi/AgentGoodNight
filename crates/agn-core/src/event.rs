@@ -123,9 +123,23 @@ pub enum EventKind {
         id: String,
     },
     /// A wake-up / follow-up was scheduled. `recurring` keeps the session
-    /// alive until it ends.
+    /// alive until it ends; a one-shot wake-up stays pending until a turn
+    /// starts after `due` (unknown `due`: until it demonstrably fired).
     ContinuationScheduled {
         recurring: bool,
+        #[serde(default)]
+        due: Option<Millis>,
+    },
+    /// A turn started by the scheduler (cron / wake-up) — one pending
+    /// one-shot continuation has fired.
+    ContinuationFired,
+    /// A one-shot job with a known id was scheduled (unknown due time).
+    OneShotScheduled {
+        id: String,
+    },
+    /// A one-shot job was deleted (or its creation failed).
+    OneShotCancelled {
+        id: String,
     },
     /// Explicit end-of-turn signal from the tool (Stop hook, task_complete,
     /// AfterAgent, session.idle, ...).
@@ -138,11 +152,18 @@ pub enum EventKind {
         /// Replaces whatever was inferred from other sources.
         pending: Option<PendingWork>,
     },
-    /// End of turn inferred from a log entry that does not prove the tool's
-    /// own stop hooks have finished (Claude Code's final `end_turn` message
-    /// when no `stop_hook_summary` follows). Uses the long inferred settle
-    /// window; a later confirmed `TurnCompleted` replaces it.
-    TurnEndInferred,
+    /// End of turn that does not prove the tool's stop hooks have finished
+    /// (Claude Code's final `end_turn` message, or its Stop hook — which
+    /// runs alongside other Stop hooks). Uses the long inferred settle window
+    /// and never shortens an existing one; only a confirmed `TurnCompleted`
+    /// may. May carry the authoritative pending-work snapshot.
+    TurnEndInferred {
+        #[serde(default)]
+        pending: Option<PendingWork>,
+    },
+    /// The log was first read from the middle: whatever the session
+    /// announced before `at` is unknown, unless we already observed it.
+    HistoryUnknown,
     /// The last recurring job the session had announced was deleted.
     ContinuationCancelled,
     /// A goal / objective that auto-continues the session was set or

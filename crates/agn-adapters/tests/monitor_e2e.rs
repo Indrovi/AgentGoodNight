@@ -47,6 +47,8 @@ struct World {
     t0: Millis,
     monitor: Monitor,
     procs: Vec<AgentProcess>,
+    /// Parent chain the simulated hook reports (the agent process).
+    hook_ancestors: Vec<u32>,
 }
 
 impl World {
@@ -71,11 +73,13 @@ impl World {
             data_dir: root.join("data"),
             claude_root: Some(root.join(".claude")),
             codex_root: Some(root.join(".codex")),
+            default_claude_root: None,
+            default_codex_root: None,
             integration: env,
         };
         let settings = Settings { settle_secs: 15, countdown_secs: 10, ..Settings::default() };
         let monitor = Monitor::new(settings, paths, ProcessSource::Fixed(Ok(vec![]), false), PowerBackend::DryRun);
-        Self { _dir: dir, root, t0: now_millis(), monitor, procs: vec![] }
+        Self { _dir: dir, root, t0: now_millis(), monitor, procs: vec![], hook_ancestors: vec![] }
     }
 
     fn at(&self, sec: i64) -> Millis {
@@ -105,7 +109,7 @@ impl World {
 
     fn hook(&self, agent: &str, payload: Value) {
         let mut input = payload.to_string().into_bytes();
-        let out = hook::run(Some(agent), &mut input.as_slice(), &self.root.join("data"));
+        let out = hook::run(Some(agent), &mut input.as_slice(), &self.root.join("data"), self.hook_ancestors.clone());
         assert!(out.stored);
         input.clear();
     }
@@ -130,6 +134,8 @@ impl World {
             role,
             origin: None,
             cwd: None,
+            config_home: None,
+            parent: None,
         });
         self.monitor.set_fixed_processes(Ok(self.procs.clone()));
         self.monitor.invalidate();
@@ -184,8 +190,9 @@ fn claude_and_codex_overnight_then_exactly_one_action() {
     let pid = w.monitor.tracker().get(&SessionKey::new(AgentKind::ClaudeCode, "c1")).unwrap().pid;
     assert_eq!(pid, Some(9001), "registry links the process");
 
+    assert!(w.run_until(6, 59).is_empty());
     w.codex(60, "event_msg", json!({"type":"task_complete","error":null}));
-    assert!(w.run_until(6, 100).is_empty(), "claude still running");
+    assert!(w.run_until(60, 100).is_empty(), "claude still running");
     assert_eq!(w.state(AgentKind::Codex, CODEX_ID), SessionState::Completed);
 
     // Background bash launched, then the turn ends: must keep waiting.
@@ -197,8 +204,9 @@ fn claude_and_codex_overnight_then_exactly_one_action() {
 
     // Notification arrives, Claude reports and stops.
     w.claude(401, json!({"type":"user","turnOrigin":"task_notification","message":{"content":"<task-notification><task-id>bg1</task-id><status>completed</status></task-notification>"}}));
+    assert!(w.run_until(401, 409).is_empty());
     w.claude(410, json!({"type":"system","subtype":"stop_hook_summary","preventedContinuation":false}));
-    let actions = w.run_until(401, 470);
+    let actions = w.run_until(410, 470);
     assert_eq!(actions, vec![PowerAction::Sleep], "settle 15 s + countdown 10 s");
     assert!(!w.monitor.controller().is_armed());
     assert!(w.run_until(471, 700).is_empty(), "never repeats");
@@ -256,6 +264,7 @@ fn cursor_with_hooks_and_a_pre_install_process() {
     w.procs.clear();
     w.add_proc(AgentKind::Cursor, 5001, ProcessRole::Editor, now_millis());
     std::thread::sleep(std::time::Duration::from_millis(10));
+    w.hook_ancestors = vec![9999, 5001]; // shell, then the Cursor process
     w.hook(
         "cursor",
         json!({"conversation_id":"","generation_id":"","hook_event_name":"workspaceOpen","cursor_version":"2.1"}),
@@ -280,7 +289,11 @@ fn claude_hooks_report_rate_limit_then_resume() {
     std::thread::sleep(std::time::Duration::from_millis(5));
     w.hook("claude_code", json!({"session_id":"c1","hook_event_name":"UserPromptSubmit"}));
     w.hook("claude_code", json!({"session_id":"c1","hook_event_name":"Stop","background_tasks":[],"session_crons":[]}));
-    assert_eq!(w.run_until(301, 340), vec![PowerAction::Sleep]);
+    // The hook Stop alone is unconfirmed (other Stop hooks may still run)…
+    assert!(w.run_until(301, 340).is_empty());
+    // …until Claude Code writes stop_hook_summary after all Stop hooks.
+    w.claude(341, json!({"type":"system","subtype":"stop_hook_summary","preventedContinuation":false}));
+    assert_eq!(w.run_until(341, 380), vec![PowerAction::Sleep]);
     assert!(fs::read_dir(w.root.join("data/spool")).unwrap().next().is_none(), "spool drained");
 }
 

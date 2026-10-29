@@ -462,12 +462,20 @@ fn scheduled_wakeup_and_recurring_cron() {
     let mut sim = Sim::new();
     sim.arm();
     sim.ev(ClaudeCode, "loop", EventKind::TurnStarted);
-    sim.ev(ClaudeCode, "loop", EventKind::ContinuationScheduled { recurring: false });
+    let due = sim.now + 20 * MINUTE;
+    sim.ev(ClaudeCode, "loop", EventKind::ContinuationScheduled { recurring: false, due: Some(due) });
     sim.ev(ClaudeCode, "loop", stop());
     assert_eq!(sim.state(ClaudeCode, "loop"), SessionState::AwaitingContinuation);
-    assert_eq!(sim.run_for(20 * MINUTE), 0);
-    // Wake-up fires: a new turn that does not reschedule.
+    // Unrelated work before the wake-up is due does not consume it.
+    sim.run_for(5 * MINUTE);
+    sim.ev(ClaudeCode, "loop", EventKind::TurnStarted);
+    sim.ev(ClaudeCode, "loop", stop());
+    assert_eq!(sim.run_for(15 * MINUTE), 0);
+    // Wake-up fires: a new turn (not mere activity) that does not reschedule.
     sim.ev(ClaudeCode, "loop", EventKind::Activity { detail: None });
+    sim.ev(ClaudeCode, "loop", stop());
+    assert_eq!(sim.run_for(3 * MINUTE), 0, "activity alone does not prove the wake-up fired");
+    sim.ev(ClaudeCode, "loop", EventKind::TurnStarted);
     sim.ev(ClaudeCode, "loop", stop());
     assert_eq!(sim.run_for(3 * MINUTE), 1);
 

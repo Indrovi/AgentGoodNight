@@ -45,9 +45,9 @@ function write(payload) {
   try {
     mkdirSync(SPOOL, { recursive: true });
     const now = Date.now();
-    const name = `${String(now).padStart(13, "0")}-${process.pid}-oc${seq++}.json`;
+    const name = `${String(now).padStart(13, "0")}-${process.pid}-${String(seq++).padStart(10, "0")}.json`;
     const tmp = join(SPOOL, `.${name}.tmp`);
-    writeFileSync(tmp, JSON.stringify({ v: 1, agent: "opencode", received_at: now, hook_pid: process.pid, payload }) + "\n");
+    writeFileSync(tmp, JSON.stringify({ v: 1, agent: "opencode", received_at: now, hook_pid: process.pid, ancestors: [process.pid, process.ppid], payload }) + "\n");
     renameSync(tmp, join(SPOOL, name));
   } catch (_) { /* never disturb OpenCode */ }
 }
@@ -156,6 +156,13 @@ mod tests {
             EventKind::TurnFailed { kind: FailureKind::Interrupted, .. }
         ));
         assert!(matches!(k(json!({"event":"permission.asked","sessionID":"o"})), EventKind::WaitingForInput { .. }));
+    }
+
+    #[test]
+    fn plugin_names_sort_in_write_order() {
+        // Zero-padded sequence: "…-0000000010.json" sorts after "…-0000000009.json".
+        assert!(PLUGIN_SOURCE.contains("String(seq++).padStart(10, \"0\")"));
+        assert!(PLUGIN_SOURCE.contains("plugin.loaded"), "liveness record at load");
     }
 
     #[test]

@@ -20,6 +20,8 @@ fn main() {
         data_dir: data.clone(),
         claude_root: claude::default_root(),
         codex_root: codex::default_root(),
+        default_claude_root: None,
+        default_codex_root: None,
         integration: IntegrationEnv::system(data.clone(), data.join("spool"), None),
     };
     let mut m = Monitor::new(settings, paths, ProcessSource::System(ProcessScanner::new()), PowerBackend::DryRun);
@@ -38,6 +40,7 @@ fn main() {
             a.name, a.enabled, a.observable, a.code, a.integration.mode, a.integration.installed, a.processes
         );
     }
+    println!("environment blocks: {:?}", snap.environment);
     for u in &snap.untracked {
         println!("untracked {:?} pid={} {}", u.agent, u.pid, u.name);
     }
