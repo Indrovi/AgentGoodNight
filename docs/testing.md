@@ -25,6 +25,10 @@ through `tauri-driver` and WebKitWebDriver (under Xvfb); a WebDriver session end
 so the tray part is Windows-only there. macOS has no WebDriver for WKWebView, so only the smoke
 test covers its GUI.
 
+Start-up time to the open window in CI: Windows ~5 s, macOS ~2 s, Linux ~2 s inside a D-Bus
+session (`dbus-run-session`, as on a desktop). Without any session bus, Linux start-up first runs
+into a 25 s D-Bus timeout (the single-instance check) before the window opens.
+
 ## Manual verification so far
 
 Windows 11 (AMD, S3 standby and hibernation available according to `powercfg /a`):
