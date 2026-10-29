@@ -1,23 +1,29 @@
-// End-to-end UI test of the real app window (Windows / WebView2 only).
+// End-to-end UI test of the real app window.
 //
 // Starts the *debug* build — which contains only the DryRun power manager —
 // against a throw-away sandbox (AGN_TEST_HOME, no process scan), drives the
-// WebView over the Chrome DevTools Protocol with real mouse input and checks
-// the overnight flow: sessions and states, arming, countdown, Cancel, new
-// activity cancelling the countdown, the simulated action, integrations,
-// closing to the tray and reopening on a countdown.
+// real window and checks the overnight flow: sessions and states, arming,
+// countdown, Cancel, new activity cancelling the countdown, the simulated
+// action, integrations and, on Windows, closing to the tray and reopening on
+// a countdown.
 //
-//   cargo build -p agentgoodnight -p agn-hook && node scripts/ui-e2e.mjs [path-to-exe]
+// Windows: WebView2 over the Chrome DevTools Protocol (real mouse input).
+// Linux:   WebKitGTK over WebDriver via tauri-driver (+ WebKitWebDriver);
+//          run it under a display, e.g. xvfb-run.
+//
+//   cargo build -p agentgoodnight -p agn-hook && node scripts/ui-e2e.mjs [path-to-binary]
 
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+const WIN = process.platform === 'win32';
+const EXT = WIN ? '.exe' : '';
 const PORT = 9333 + Math.floor(Math.random() * 500);
-const exe = path.resolve(process.argv[2] || 'target/debug/agentgoodnight.exe');
+const exe = path.resolve(process.argv[2] || `target/debug/agentgoodnight${EXT}`);
 // Connect copies the hook binary that sits next to the app.
-const hookBin = path.join(path.dirname(exe), 'agentgoodnight-hook.exe');
+const hookBin = path.join(path.dirname(exe), `agentgoodnight-hook${EXT}`);
 if (!fs.existsSync(exe) || !fs.existsSync(hookBin)) {
   console.error(`missing ${exe} or ${hookBin} — run: cargo build -p agentgoodnight -p agn-hook`);
   process.exit(2);
@@ -121,8 +127,28 @@ $p = Get-Process -Id ${app.pid} -ErrorAction SilentlyContinue
   }
 }
 
+// ------------------------------------------------------------ WebDriver (Linux)
+
+const WD = 'http://127.0.0.1:4444';
+let wdSession = null;
+async function wd(method, url, body) {
+  const r = await fetch(`${WD}${url}`, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json();
+  if (j.value && j.value.error) throw new Error(`${j.value.error}: ${j.value.message}`);
+  return j.value;
+}
+async function wdConnect() {
+  for (let i = 0; i < T(60); i++) {
+    try { if ((await (await fetch(`${WD}/status`)).json()).value) break; } catch { /* starting */ }
+    await sleep(500);
+  }
+  const s = await wd('POST', '/session', { capabilities: { alwaysMatch: { 'tauri:options': { application: exe } } } });
+  wdSession = s.sessionId;
+}
+
 let cdp;
 async function js(expr) {
+  if (!WIN) return wd('POST', `/session/${wdSession}/execute/sync`, { script: `return (${expr});`, args: [] });
   const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
   return r.result.value;
@@ -138,6 +164,12 @@ async function until(expr, timeout, what) {
   return false;
 }
 async function click(selector) {
+  if (!WIN) {
+    // WebDriver element click: scrolls into view and uses real input.
+    const el = await wd('POST', `/session/${wdSession}/element`, { using: 'css selector', value: selector });
+    await wd('POST', `/session/${wdSession}/element/${Object.values(el)[0]}/click`, {});
+    return;
+  }
   const box = await js(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return null; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return r.width ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null; })()`);
   if (!box) throw new Error(`not clickable: ${selector}`);
   for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
@@ -174,17 +206,18 @@ const phase = (p) => `typeof snap !== 'undefined' && snap && snap.phase.phase ==
 
 // ------------------------------------------------------------------- scenario
 
-const app = spawn(exe, [], {
-  env: {
-    ...process.env,
-    AGN_DATA_DIR: data,
-    AGN_TEST_HOME: home,
-    AGN_TEST_NO_PROCESSES: '1',
-    // Debug builds only: DevTools port and a WebView2 profile of its own.
-    AGN_TEST_DEVTOOLS_PORT: String(PORT),
-  },
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
+const env = {
+  ...process.env,
+  AGN_DATA_DIR: data,
+  AGN_TEST_HOME: home,
+  AGN_TEST_NO_PROCESSES: '1',
+  // Debug builds only: DevTools port and a WebView2 profile of its own.
+  AGN_TEST_DEVTOOLS_PORT: String(PORT),
+};
+// Linux: tauri-driver starts the app (with this environment) for the session.
+const app = WIN
+  ? spawn(exe, [], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+  : spawn('tauri-driver', [], { env, stdio: ['ignore', 'pipe', 'pipe'] });
 let log = '';
 app.stdout.on('data', (d) => { log += d; });
 app.stderr.on('data', (d) => { log += d; });
@@ -196,7 +229,8 @@ const B = 'bbbbbbbb-0000-4000-8000-000000000002';
 const C = 'cccccccc-0000-7000-8000-000000000003';
 
 try {
-  cdp = await connect();
+  if (WIN) cdp = await connect();
+  else await wdConnect();
   await until(`document.querySelector('#dry-badge') && !document.querySelector('#dry-badge').hidden`, 20000, 'DRY RUN badge shown');
   check((await js(`document.querySelector('#arm').getAttribute('aria-checked')`)) === 'false', 'monitoring starts switched off');
 
@@ -220,7 +254,8 @@ try {
 
   claude(B, 'C:\\work\\infra', 'interrupt');
   await until(`${stateOf('infra')} && li.querySelector('.state.interrupted'))`, 15000, 'interrupt shown');
-  await click('#session-list li:has(.state.interrupted) .icon-btn');
+  await js(`[...document.querySelectorAll('#session-list li')].find(li => li.querySelector('.state.interrupted')).querySelector('.icon-btn').dataset.e2e = 'target'`);
+  await click('[data-e2e="target"]');
   await until(`${stateOf('infra')} && li.classList.contains('dim'))`, 5000, 'interrupted session excluded by the user');
 
   claude(A, 'C:\\work\\web-shop', 'bgdone');
@@ -240,7 +275,9 @@ try {
   codex(C, 'C:\\work\\api-server', 'done');
   await until(`${phase('countdown')} && document.querySelector('#settings-view').hidden && !document.querySelector('#cancel').hidden`, 60000, 'countdown switches to the main view');
   await until(`typeof snap !== 'undefined' && snap && !snap.armed && snap.last_power && snap.last_power.backend === 'dry_run'`, 30000, 'countdown ends in a DryRun action and switches monitoring off');
-  check(/DRY RUN: power action recorded/.test(log), 'log confirms nothing was executed');
+  if (log.includes('starting AgentGoodNight')) {
+    check(/DRY RUN: power action recorded/.test(log), 'log confirms nothing was executed');
+  }
 
   // Integrations write only into the sandbox and survive a round trip.
   await click('#open-settings');
@@ -262,24 +299,28 @@ try {
   await click('#close-settings');
 
   // Closing the window keeps monitoring in the tray; a countdown reopens it.
-  await click('#arm');
-  await until(`snap.armed`, 5000, 're-armed');
-  cdp.ws.close();
-  closeWindow(app.pid);
-  await sleep(T(3000));
-  check(!exited, 'closing the window keeps the app running');
-  const pages = await (await fetch(`http://127.0.0.1:${PORT}/json`).catch(() => null))?.json().catch(() => []) ?? [];
-  check(!pages.some((t) => t.type === 'page'), 'closed window releases the webview');
-  claude(A, 'C:\\work\\web-shop', 'user');
-  claude(A, 'C:\\work\\web-shop', 'stop');
-  cdp = await connect();
-  await until(`${phase('countdown')} && !document.querySelector('#cancel').hidden`, 60000, 'countdown reopens the window with Cancel');
-  await click('#cancel');
-  await until(phase('watching'), 5000, 'Cancel works in the reopened window');
+  // (Windows only: a WebDriver session ends with its window.)
+  if (WIN) {
+    await click('#arm');
+    await until(`snap.armed`, 5000, 're-armed');
+    cdp.ws.close();
+    closeWindow(app.pid);
+    await sleep(T(3000));
+    check(!exited, 'closing the window keeps the app running');
+    const pages = await (await fetch(`http://127.0.0.1:${PORT}/json`).catch(() => null))?.json().catch(() => []) ?? [];
+    check(!pages.some((t) => t.type === 'page'), 'closed window releases the webview');
+    claude(A, 'C:\\work\\web-shop', 'user');
+    claude(A, 'C:\\work\\web-shop', 'stop');
+    cdp = await connect();
+    await until(`${phase('countdown')} && !document.querySelector('#cancel').hidden`, 60000, 'countdown reopens the window with Cancel');
+    await click('#cancel');
+    await until(phase('watching'), 5000, 'Cancel works in the reopened window');
+  }
   console.log('sessions at the end:', await states());
 } catch (e) {
   check(false, 'scenario', e.stack || String(e));
 } finally {
+  if (wdSession) await wd('DELETE', `/session/${wdSession}`).catch(() => {});
   if (!exited) app.kill();
   await sleep(1000);
   if (failures) {

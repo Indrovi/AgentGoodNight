@@ -106,6 +106,16 @@ jobs:
           cargo build -p agentgoodnight -p agn-hook
           node scripts/ui-e2e.mjs target/debug/agentgoodnight.exe
 
+      # WebKitGTK has no DevTools protocol; Tauri's WebDriver bridge drives it.
+      - name: UI end-to-end test (Linux, WebDriver, sandboxed agent data)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get install -y webkit2gtk-driver
+          cargo install tauri-driver --locked
+          cargo build -p agentgoodnight -p agn-hook
+          xvfb-run -a node scripts/ui-e2e.mjs target/debug/agentgoodnight
+
       - uses: actions/upload-artifact@v7
         with:
           name: agentgoodnight-dryrun-${{ matrix.os }}
