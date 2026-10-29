@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::{AgentEvent, EventKind, FailureKind};
 use crate::model::{Session, SessionKey, SessionState};
-use crate::time::{Millis, SECOND};
+use crate::time::{MINUTE, Millis, SECOND};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackerConfig {
@@ -24,13 +24,31 @@ pub struct TrackerConfig {
     /// completed. Absorbs stop-hook continuations (`/goal`), queued prompts
     /// and late log writes. This is a debounce, not a completion estimate.
     pub settle: Millis,
+    /// Settle window after an *inferred* end of turn (no confirmation that
+    /// the tool's stop hooks finished). Longer than Claude Code's default
+    /// stop-hook timeout of 600 s.
+    #[serde(default = "default_inferred_settle")]
+    pub inferred_settle: Millis,
+}
+
+fn default_inferred_settle() -> Millis {
+    11 * MINUTE
 }
 
 impl Default for TrackerConfig {
     fn default() -> Self {
-        Self { settle: 90 * SECOND }
+        Self { settle: 90 * SECOND, inferred_settle: default_inferred_settle() }
     }
 }
+
+/// Pseudo background id: the session's log was first read from the middle,
+/// so work announced before that point is unknown. Only an authoritative
+/// pending-work snapshot (Claude Code Stop hook) clears it.
+pub const HISTORY_UNKNOWN: &str = "history:unknown";
+/// Pseudo background id for a pending-work snapshot that was truncated.
+pub const SNAPSHOT_TRUNCATED: &str = "snapshot:truncated";
+/// How far before "now" timestamps are clamped after a backward clock jump.
+pub const CLAMP_SLACK: Millis = 2 * MINUTE;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Tracker {
@@ -126,6 +144,7 @@ impl Tracker {
     pub fn apply(&mut self, ev: &AgentEvent, now: Millis) -> bool {
         let key = ev.key();
         let settle = self.cfg.settle;
+        let inferred_settle = self.cfg.inferred_settle.max(settle);
         let tombs = self.tombstones.entry(key.clone()).or_default();
         let s = self.sessions.entry(key.clone()).or_insert_with(|| Session::new(key, ev.at.min(now)));
         let before = s.clone();
@@ -169,6 +188,9 @@ impl Tracker {
                 if fresh {
                     s.wakeup_scheduled = false;
                     s.ended_unfinished = false;
+                    // "Ignore" covers the episode the user looked at, not
+                    // future work in the same session.
+                    s.ignored = false;
                     transition(s, SessionState::Running, at, None);
                 }
             }
@@ -226,6 +248,22 @@ impl Tracker {
                 }
                 hold_for_continuation(s, at);
             }
+            EventKind::ContinuationCancelled => {
+                s.recurring = false;
+                release_continuation(s, at.max(s.state_since), settle);
+            }
+            EventKind::TurnEndInferred => {
+                if fresh {
+                    s.last_turn_end = Some(at);
+                    if s.has_pending_continuation() {
+                        let reason = continuation_reason(s);
+                        transition(s, SessionState::AwaitingContinuation, at, Some(reason));
+                    } else {
+                        transition(s, SessionState::Finishing, at, None);
+                        s.settle_until = Some(at + inferred_settle);
+                    }
+                }
+            }
             EventKind::GoalStatus { active } => {
                 s.goal_active = *active;
                 if *active {
@@ -241,6 +279,11 @@ impl Tracker {
                         s.wakeup_scheduled = p.wakeup;
                         s.recurring = p.recurring;
                         s.pending_snapshot_at = Some(at);
+                        if !fresh {
+                            // An older but authoritative snapshot can still
+                            // resolve what we were waiting for.
+                            release_continuation(s, at.max(s.state_since), settle);
+                        }
                     }
                 }
                 if fresh {
@@ -271,7 +314,7 @@ impl Tracker {
                 if fresh {
                     match s.state {
                         SessionState::Finishing => {
-                            s.completed_at = Some(at);
+                            s.completed_at = Some(at.min(now));
                         }
                         SessionState::Completed | SessionState::Idle | SessionState::Ended => {}
                         _ => s.ended_unfinished = true,
@@ -304,16 +347,25 @@ impl Tracker {
     pub fn tick(&mut self, now: Millis) -> bool {
         let mut changed = false;
         for s in self.sessions.values_mut() {
-            if s.state == SessionState::Finishing && s.settle_until.is_some_and(|t| t <= now) {
-                if s.has_pending_continuation() {
-                    let reason = continuation_reason(s);
-                    transition(s, SessionState::AwaitingContinuation, now, Some(reason));
-                } else {
-                    transition(s, SessionState::Completed, now, None);
-                    s.completed_at = Some(now);
-                }
-                changed = true;
+            let Some(until) = s.settle_until.filter(|t| *t <= now) else { continue };
+            if s.state != SessionState::Finishing {
+                continue;
             }
+            // state_since stays at the end-of-turn evidence: anything
+            // timestamped after it — even if delivered late — still revives
+            // the session.
+            let since = s.state_since;
+            if s.has_pending_continuation() {
+                let reason = continuation_reason(s);
+                transition(s, SessionState::AwaitingContinuation, since, Some(reason));
+            } else {
+                transition(s, SessionState::Completed, since, None);
+                // A completion is as old as its evidence, never "now": an old
+                // turn first seen later must not satisfy "completed after
+                // arming".
+                s.completed_at = Some(until);
+            }
+            changed = true;
         }
         if changed {
             self.revision += 1;
@@ -329,18 +381,57 @@ impl Tracker {
         let Some(s) = self.sessions.get_mut(key) else { return false };
         let changed = match s.state {
             SessionState::Finishing => {
-                s.completed_at = Some(now);
+                s.completed_at = Some(s.last_turn_end.unwrap_or(now).min(now));
                 transition(s, SessionState::Ended, now, Some("process_exited".into()));
                 true
             }
             SessionState::Completed | SessionState::Idle | SessionState::Ended => false,
             SessionState::Interrupted if s.reason.as_deref() == Some("process_exited") => false,
+            // The turn had ended and only background work was pending; it died
+            // with the process. Nothing can continue, but nothing completed.
+            SessionState::AwaitingContinuation => {
+                s.ended_unfinished = true;
+                s.background.clear();
+                s.open_subagents.clear();
+                s.wakeup_scheduled = false;
+                s.recurring = false;
+                s.goal_active = false;
+                transition(s, SessionState::Ended, now, Some("process_exited".into()));
+                true
+            }
             _ => {
                 s.ended_unfinished = true;
                 transition(s, SessionState::Interrupted, now, Some("process_exited".into()));
                 true
             }
         };
+        if changed {
+            self.revision += 1;
+        }
+        changed
+    }
+
+    /// After the wall clock jumped backwards: pulls every timestamp that now
+    /// lies in the future back to shortly before `now` (the jump happened
+    /// somewhere since the last cycle), so new events are not treated as
+    /// stale and old completions cannot count for a later arming.
+    pub fn clamp_future(&mut self, now: Millis) -> bool {
+        let settle = self.cfg.settle;
+        let now = now - CLAMP_SLACK;
+        let mut changed = false;
+        for s in self.sessions.values_mut() {
+            let before = s.clone();
+            s.state_since = s.state_since.min(now);
+            s.last_activity = s.last_activity.min(now);
+            s.first_seen = s.first_seen.min(now);
+            s.last_turn_end = s.last_turn_end.map(|t| t.min(now));
+            s.pending_snapshot_at = s.pending_snapshot_at.map(|t| t.min(now));
+            s.settle_until = s.settle_until.map(|t| t.min(now + settle));
+            if s.completed_at.is_some_and(|t| t >= now) {
+                s.completed_at = Some(now - 1);
+            }
+            changed |= *s != before;
+        }
         if changed {
             self.revision += 1;
         }
@@ -404,6 +495,9 @@ fn resume(s: &mut Session, at: Millis) {
     if matches!(s.state, SessionState::AwaitingContinuation | SessionState::Finishing | SessionState::Completed) {
         s.wakeup_scheduled = false;
     }
+    // A session that comes back to life is tracked again even if the user
+    // ignored its previous state.
+    s.ignored = false;
     transition(s, SessionState::Running, at, None);
 }
 
@@ -449,6 +543,8 @@ fn continuation_reason(s: &Session) -> String {
         "goal".into()
     } else if !s.open_subagents.is_empty() {
         "subagents".into()
+    } else if s.background.contains(HISTORY_UNKNOWN) {
+        "history_unknown".into()
     } else if !s.background.is_empty() {
         "background_task".into()
     } else {

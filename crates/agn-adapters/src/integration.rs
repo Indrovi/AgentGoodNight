@@ -132,8 +132,16 @@ const CLAUDE_EVENTS: &[(&str, bool)] = &[
 const GEMINI_EVENTS: &[&str] =
     &["SessionStart", "SessionEnd", "BeforeAgent", "AfterAgent", "BeforeTool", "AfterTool", "Notification"];
 
-const CURSOR_EVENTS: &[&str] =
-    &["sessionStart", "sessionEnd", "beforeSubmitPrompt", "postToolUse", "afterAgentResponse", "subagentStart", "stop"];
+const CURSOR_EVENTS: &[&str] = &[
+    "workspaceOpen",
+    "sessionStart",
+    "sessionEnd",
+    "beforeSubmitPrompt",
+    "postToolUse",
+    "afterAgentResponse",
+    "subagentStart",
+    "stop",
+];
 
 pub fn status(agent: AgentKind, env: &IntegrationEnv) -> IntegrationStatus {
     let path = env.config_path(agent);

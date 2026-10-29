@@ -21,7 +21,7 @@ use crate::time::{Millis, now_millis};
 
 pub const SPOOL_VERSION: u32 = 1;
 const MAX_STRING: usize = 512;
-const MAX_ARRAY: usize = 64;
+const MAX_ARRAY: usize = 512;
 const MAX_BATCH: usize = 5_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -74,6 +74,12 @@ pub fn write_record(dir: &Path, record: &SpoolRecord) -> io::Result<PathBuf> {
 
 /// Reads up to a batch of complete records, oldest first. Does not delete.
 pub fn read_batch(dir: &Path) -> io::Result<Vec<SpoolEntry>> {
+    read_batch_filtered(dir, |_| true)
+}
+
+/// Like [`read_batch`], skipping file names for which `keep` is false
+/// (records already applied but not yet deleted).
+pub fn read_batch_filtered(dir: &Path, keep: impl Fn(&str) -> bool) -> io::Result<Vec<SpoolEntry>> {
     let rd = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -84,7 +90,7 @@ pub fn read_batch(dir: &Path) -> io::Result<Vec<SpoolEntry>> {
         .map(|e| e.path())
         .filter(|p| {
             p.extension().is_some_and(|x| x == "json")
-                && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| !n.starts_with('.'))
+                && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| !n.starts_with('.') && keep(n))
         })
         .collect();
     paths.sort();
@@ -160,6 +166,7 @@ const ALLOWED_TOP: &[&str] = &[
 ];
 
 const ALLOWED_NESTED: &[&str] = &[
+    "truncated",
     "id",
     "type",
     "status",
@@ -202,7 +209,13 @@ fn scrub_value(v: Value, depth: usize) -> Value {
     match v {
         Value::String(s) => Value::String(truncate(s)),
         Value::Array(items) if depth < 4 => {
-            Value::Array(items.into_iter().take(MAX_ARRAY).map(|i| scrub_value(i, depth + 1)).collect())
+            let truncated = items.len() > MAX_ARRAY;
+            let mut out: Vec<Value> = items.into_iter().take(MAX_ARRAY).map(|i| scrub_value(i, depth + 1)).collect();
+            if truncated {
+                // Readers must not treat a cut list as complete.
+                out.push(serde_json::json!({ "truncated": true }));
+            }
+            Value::Array(out)
         }
         Value::Object(map) if depth < 4 => Value::Object(scrub_object(map, ALLOWED_NESTED, depth)),
         Value::Array(_) | Value::Object(_) => Value::Null,

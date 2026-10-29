@@ -30,6 +30,9 @@ pub struct Settings {
     pub countdown_secs: u64,
     /// Sessions quiet for longer than this do not block, hours.
     pub relevance_hours: u64,
+    /// Block while a WSL virtual machine runs (agents inside it are not
+    /// observable from the host).
+    pub watch_wsl: bool,
 }
 
 impl Default for Settings {
@@ -41,6 +44,7 @@ impl Default for Settings {
             settle_secs: 90,
             countdown_secs: 60,
             relevance_hours: 24,
+            watch_wsl: true,
         }
     }
 }

@@ -129,7 +129,8 @@ function renderStatus(s) {
     return;
   }
   if (s.last_error) {
-    title.textContent = t('status.error', { error: s.last_error });
+    const known = strings[`error.${s.last_error}`];
+    title.textContent = known ? known : t('status.error', { error: s.last_error });
     dot.classList.add('bad');
   }
   if (!s.armed) {
@@ -147,10 +148,15 @@ function renderStatus(s) {
   const reasons = s.verdict.type === 'blocked' ? s.verdict.reasons : [];
   const unobs = reasons.find((r) => r.type === 'adapter_unobservable');
   const untracked = reasons.find((r) => r.type === 'untracked_process');
+  const env = reasons.find((r) => r.type === 'environment_unobservable');
   const active = reasons.filter((r) => r.type === 'session_active');
   if (unobs) {
     title.textContent = t('status.unobservable', { tool: toolName(unobs.agent) });
     sub.textContent = t(`adapter.${unobs.code}`);
+    dot.classList.add('bad');
+  } else if (env) {
+    title.textContent = t('status.environment');
+    sub.textContent = t(`env.${env.code}`);
     dot.classList.add('bad');
   } else if (untracked) {
     title.textContent = t('status.untracked', { tool: toolName(untracked.agent) });
@@ -227,6 +233,8 @@ function renderSessions(s) {
 }
 
 function renderAdapters(s) {
+  $('watch-wsl').setAttribute('aria-checked', String(!!s.watch_wsl));
+  $('wsl-row').hidden = !navigator.userAgent.includes('Windows');
   const list = $('adapter-list');
   list.replaceChildren();
   for (const a of s.adapters) {
@@ -320,6 +328,7 @@ function wire() {
     b.addEventListener('click', () => act('set_action', { action: b.dataset.action }));
   });
   $('cancel').addEventListener('click', () => act('cancel_countdown'));
+  $('watch-wsl').addEventListener('click', () => act('set_watch_wsl', { watch: !(snap && snap.watch_wsl) }));
   $('open-settings').addEventListener('click', () => {
     $('main-view').hidden = true;
     $('settings-view').hidden = false;
@@ -381,7 +390,7 @@ const demo = {
         adapter('opencode', 'OpenCode', 'not_detected', true, 'plugin', false),
         adapter('cursor', 'Cursor', 'no_integration', false, 'hooks', false, 1),
       ],
-      untracked: [], last_power: null, last_error: null, language: 'cs',
+      untracked: [], environment: [], watch_wsl: true, last_power: null, last_error: null, language: 'cs',
     };
   },
   handle(cmd, args) {
@@ -390,6 +399,7 @@ const demo = {
     if (cmd === 'set_armed') { st.armed = args.armed; st.phase = { phase: args.armed ? 'watching' : 'off' }; }
     if (cmd === 'set_action') st.action = args.action;
     if (cmd === 'set_language') st.language = args.lang;
+    if (cmd === 'set_watch_wsl') st.watch_wsl = args.watch;
     if (cmd === 'set_session_ignored') st.sessions.forEach((x) => { if (x.id === args.sessionId) x.ignored = args.ignored; });
     if (cmd === 'set_agent_enabled') st.adapters.forEach((a) => { if (a.agent === args.agentId) a.enabled = args.enabled; });
     if (cmd === 'install_integration' || cmd === 'uninstall_integration') {

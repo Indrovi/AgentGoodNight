@@ -20,7 +20,7 @@ use agn_core::model::{AgentKind, EvidenceSource};
 use agn_core::time::{Millis, parse_rfc3339_millis};
 use serde_json::Value;
 
-use crate::tail::{FileTail, for_each_zstd_line, mtime_millis};
+use crate::tail::{FileTail, for_each_zstd_line, last_line_containing, mtime_millis};
 use crate::{SourceStatus, str_field};
 
 const AGENT: AgentKind = AgentKind::Codex;
@@ -92,6 +92,11 @@ impl CodexAdapter {
                         if read.from_middle {
                             if let Some(meta) = read_first_line(path) {
                                 r.parser.parse(&meta, &mut events);
+                            }
+                            // A goal set before the window still auto-continues
+                            // the thread.
+                            if let Some(goal) = last_line_containing(path, "\"thread_goal_updated\"") {
+                                r.parser.parse(&goal, &mut events);
                             }
                         }
                     }
@@ -348,7 +353,7 @@ mod tests {
         for l in lines {
             p.parse(l, &mut evs);
         }
-        let mut t = Tracker::new(TrackerConfig { settle: 1_000 });
+        let mut t = Tracker::new(TrackerConfig { settle: 1_000, ..Default::default() });
         t.apply_all(evs.clone(), 4_000_000_000_000);
         t.tick(4_000_000_000_000);
         (t.get(&agn_core::SessionKey::new(AGENT, ID)).unwrap().state, evs)

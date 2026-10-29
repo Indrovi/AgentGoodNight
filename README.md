@@ -29,13 +29,18 @@ fresh full rescan at the end of the 60 s countdown:
    (background tasks, subagents, scheduled wake-ups, cron loops, active goals),
    *reconnecting, rate-limited, errored, interrupted* or *unknown*.
 4. Every enabled tool can actually be observed. A tool that runs without a working integration,
-   an unreadable data directory or a failed process scan **blocks** the action.
-5. No agent process is running that cannot be attributed to a tracked session.
+   an unreadable data directory, a rejected hook record or a failed process scan **blocks** the
+   action. On Windows a running WSL 2 VM blocks too (agents inside it are invisible), unless
+   turned off in the tools panel.
+5. No agent process is running that cannot be attributed to a tracked session — a hook-only tool
+   must have produced at least one hook record since its process started.
 
-New activity cancels the countdown, and so does a time gap such as the machine having slept: after
-wake-up only completions recorded from then on count. Shutdown never force-closes applications
-(apps may veto it).
-Individual sessions or processes can be excluded from the decision explicitly in the UI.
+A completion counts only as of the time its evidence says, never as of the moment it was
+discovered. New activity cancels the countdown, and so does a time gap such as the machine having
+slept: after wake-up only completions recorded from then on count. A clock that jumps backwards
+switches monitoring off. Shutdown never force-closes applications (apps may veto it).
+Individual sessions or processes can be excluded explicitly in the UI; an excluded session is
+tracked again as soon as it starts new work.
 
 ## Supported tools
 
@@ -76,8 +81,8 @@ Without `--features real-power` the build contains only the simulated power mana
 - `cargo test --workspace` runs unit tests and overnight simulations (concurrent sessions,
   `/goal`, background tasks, rate limits, late log lines, countdown cancellation, ...).
 - The real OS power backend is compiled **only** in release builds with the `real-power` feature.
-  Every debug, test and `tauri dev` build physically lacks that code and uses a DryRun manager that
-  only records what it would have done (the UI shows a *DRY RUN* badge).
+  Every debug or test build and any build without that feature physically lacks that code and uses
+  a DryRun manager that only records what it would have done (the UI shows a *DRY RUN* badge).
 - `cargo run -p agn-adapters --example probe` prints what the monitor sees on your machine,
   read-only.
 
@@ -96,11 +101,17 @@ or `~/.local/share/AgentGoodNight` (`AGN_DATA_DIR` overrides it).
 
 - Claude Code transcripts are an internal format; a format change makes sessions look *unknown*
   or *running* (the safe direction) until the adapter is updated.
-- A session whose app restarts mid-goal may need up to the last 32 MB of transcript to recover
-  the `/goal` state.
+- Without hooks, a Claude Code CLI session that has no Stop hooks writes no end-of-turn summary;
+  its last `end_turn` message then counts only after 11 minutes (longer than any Stop hook's
+  default timeout). Installing the hooks gives exact timing.
+- Transcripts are read from their last 32 MB. Work announced before that point is unknown, so
+  such sessions wait (*older history unknown*) until a Stop hook reports the authoritative list
+  of background tasks — connect the Claude Code hooks for very long sessions.
 - Codex does not persist approval prompts, stream errors or reconnects; such turns stay *running*.
-- Only local agents are tracked: Claude Desktop chats and Cowork tasks, Codex cloud tasks and
-  Cursor background (cloud) agents are out of scope.
+- Only local agents are tracked: Claude Desktop chats and Cowork tasks, Codex cloud tasks,
+  Cursor background (cloud) agents and agents inside Docker containers are out of scope.
+- Cursor's editor counts as observed only after it produced a hook record (e.g. `workspaceOpen`)
+  since it started; until then it blocks.
 - Gemini's `AfterAgent` may also fire after a stream error.
 - A build is not proof of correct behaviour on every OS; Linux and macOS power actions are
   untested on real hardware so far.

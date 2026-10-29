@@ -21,6 +21,7 @@
   "status.countdown.shutdown": "Vypnutí za {time}",
   "status.countdownHint": "Všechny sledované úlohy jsou dokončené. Nová aktivita odpočet zruší.",
   "status.verifying": "Těsně před akcí znovu ověřuji všechny relace…",
+  "status.environment": "Agenty mimo dosah nelze ověřit – akce zablokována",
   "status.cancel": "Zrušit",
   "status.done.sleep": "Uspání vyžádáno v {time}",
   "status.done.shutdown": "Vypnutí vyžádáno v {time}",
@@ -75,6 +76,9 @@
   "reason.stream_error": "výpadek spojení",
   "reason.quota_auto_resume_stale": "po limitu čeká na Enter",
 
+  "reason.history_unknown": "starší historie neznámá – připoj hooky",
+  "env.wsl_running": "Běží WSL – agenty uvnitř nelze sledovat",
+  "error.clock_changed": "Systémový čas se posunul zpět – hlídání vypnuto",
   "untracked.title": "Nesledovaný proces",
   "untracked.ignore": "Ignorovat",
   "untracked.ignored": "ignorováno",
@@ -97,6 +101,8 @@
   "settings.done": "Hotovo. Záloha: {backup}",
   "settings.doneNoBackup": "Hotovo.",
   "settings.failed": "Nepodařilo se: {error}",
+  "settings.watchWsl": "Blokovat, když běží WSL",
+  "settings.watchWslHint": "Agenti uvnitř WSL nejsou z Windows vidět. Vypni, pokud ve WSL agenty nespouštíš.",
   "settings.processes": "procesy: {n}",
 
   "adapter.disabled": "Nesledováno",
@@ -109,6 +115,7 @@
   "adapter.no_data_dir": "Data nástroje nenalezena – blokuje",
   "adapter.read_error": "Chyba čtení – blokuje",
   "adapter.spool_error": "Chyba spoolu – blokuje",
+  "adapter.spool_backlog": "Zpracovávám frontu událostí – blokuje",
   "adapter.process_scan_failed": "Nelze číst procesy – blokuje",
   "adapter.pending": "Načítám…",
 

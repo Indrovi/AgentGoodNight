@@ -61,6 +61,13 @@
       <h1 class="grow" data-i18n="settings.title">Nástroje a integrace</h1>
     </header>
     <ul id="adapter-list" class="list adapters"></ul>
+    <div class="row env-row" id="wsl-row">
+      <div>
+        <div class="label" data-i18n="settings.watchWsl">Blokovat, když běží WSL</div>
+        <div class="muted small" data-i18n="settings.watchWslHint"></div>
+      </div>
+      <button id="watch-wsl" class="switch small-switch" role="switch" aria-checked="true"><span class="knob"></span></button>
+    </div>
     <div class="row lang-row">
       <label for="lang" class="label" data-i18n="settings.language">Jazyk</label>
       <select id="lang">

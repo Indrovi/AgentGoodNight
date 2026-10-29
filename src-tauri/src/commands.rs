@@ -100,6 +100,13 @@ pub fn set_agent_enabled(app: AppHandle, engine: E<'_>, agent_id: String, enable
     Ok(refresh(&app, &engine))
 }
 
+#[tauri::command]
+pub fn set_watch_wsl(app: AppHandle, engine: E<'_>, watch: bool) -> Snapshot {
+    engine.monitor().set_watch_wsl(watch);
+    engine.save_settings();
+    refresh(&app, &engine)
+}
+
 /// Only ever called after the user confirmed the dialog showing the file.
 #[tauri::command]
 pub fn install_integration(app: AppHandle, engine: E<'_>, agent_id: String) -> Result<Option<String>, String> {

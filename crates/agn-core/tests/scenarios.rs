@@ -19,18 +19,20 @@ struct Sim {
     untracked: Vec<UntrackedProcess>,
     power: DryRunPowerManager,
     alive_pids: Vec<u32>,
+    environment: Vec<String>,
 }
 
 impl Sim {
     fn new() -> Self {
         Self {
             now: 1_000_000,
-            tracker: Tracker::new(TrackerConfig { settle: SETTLE }),
+            tracker: Tracker::new(TrackerConfig { settle: SETTLE, ..Default::default() }),
             controller: Controller::new(PowerAction::Sleep, 60 * SECOND),
             health: AgentKind::ALL.into_iter().map(|a| AdapterHealth::ok(a, "ok")).collect(),
             untracked: vec![],
             power: DryRunPowerManager::new(),
             alive_pids: vec![],
+            environment: vec![],
         }
     }
 
@@ -60,6 +62,7 @@ impl Sim {
                 sessions: &sessions,
                 health: &self.health,
                 untracked: &self.untracked,
+                environment: &self.environment,
                 alive: &alive,
             },
             &PolicyConfig::default(),

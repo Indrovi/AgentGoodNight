@@ -15,11 +15,12 @@ Docs: <https://code.claude.com/docs/en/hooks>. The desktop app runs its own copy
 | transcript `assistant` tool use, tool results, `queue-operation` enqueue, `queued_command` | activity |
 | `system/stop_hook_summary`, `preventedContinuation: false` | end of turn |
 | `system/stop_hook_summary`, `preventedContinuation: true` (stop hook such as `/goal` blocked) | activity |
-| final `assistant` message with `stop_reason: end_turn` (no Stop hooks configured → no summary) | end of turn |
+| final `assistant` message with `stop_reason: end_turn` (no Stop hooks configured → no summary) | inferred end of turn (11 min settle) |
 | `attachment/goal_status` `met: false` / `true`, `/goal clear` | goal active / cleared |
 | tool use with `run_in_background`, async `Agent`, `Monitor`, `Workflow` + id from `toolUseResult` / result text | background task |
 | `<task-notification>` with terminal `<status>` (user entry, queued command or queue operation) | background task finished |
-| `ScheduleWakeup` / `CronCreate` tool use | wake-up / recurring continuation |
+| `ScheduleWakeup` / `CronCreate` / `CronDelete` tool use | wake-up / recurring continuation / cancelled |
+| first read starts inside the file (> 32 MB) | *history unknown* until a Stop hook snapshot |
 | writes below `<session>/subagents/` (background agents, workflows) | activity of the parent |
 | `isApiErrorMessage` with `rate_limit` / 429 / `quotaLimits` | rate limited (with reset time) |
 | `system/api_error` with `retryAttempt` | reconnecting |
@@ -29,7 +30,7 @@ Docs: <https://code.claude.com/docs/en/hooks>. The desktop app runs its own copy
 | hook `StopFailure` (`rate_limit` → rate limited, others → error) | failure |
 | hook `PermissionRequest`, `Notification` `permission_prompt` / `agent_needs_input` / `elicitation_*` | waiting for input |
 | hook `SessionStart` / `SessionEnd` | idle / ended |
-| `~/.claude/sessions/<pid>.json` (`sessionId`, `startedAt`, `entrypoint`) | pid ↔ session only; `status` is not trusted |
+| `~/.claude/sessions/<pid>.json` (`sessionId`, `startedAt`, `entrypoint`, `status`) | pid ↔ session; `status` is only a veto (a busy process without a tracked session blocks) |
 
 Notes: the transcript is an internal format. No hook fires on a user interrupt. `SubagentStop` fires
 repeatedly on 2.1.309 and is ignored. Usage-limit auto-continue means a rate-limited session is
@@ -80,7 +81,13 @@ idle. OpenCode 2.x uses an incompatible plugin API and is not supported yet.
 
 ## Processes
 
-Process scans never complete a session. They detect agents we cannot see (a running Gemini,
-Cursor or OpenCode without the integration, a Claude Code process missing from the registry, a
-process started before the integration was installed) and mark tracked Claude Code sessions whose
-process vanished mid-turn as `interrupted`.
+Process scans never complete a session. They detect agents we cannot see and block:
+
+- Gemini, Cursor or OpenCode running without the integration, started before it was installed,
+  or silent (no hook record since the process started);
+- a Claude Code process missing from the registry, or registered as busy without a tracked session;
+- a Codex CLI/exec process without an active rollout in its working directory since it started;
+- a running WSL 2 VM (Windows, optional).
+
+Tracked Claude Code sessions whose process vanished mid-turn become `interrupted`; a session that
+only waited for background work becomes `ended` (nothing can continue it, nothing completed).

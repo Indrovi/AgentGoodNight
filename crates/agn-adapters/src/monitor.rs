@@ -24,7 +24,7 @@ use serde::Serialize;
 use crate::claude::{self, ClaudeAdapter, RegistryEntry, origin_from_entrypoint};
 use crate::codex::CodexAdapter;
 use crate::integration::{self, IntegrationEnv, IntegrationStatus};
-use crate::process::{AgentProcess, ProcessRole, ProcessScanner};
+use crate::process::{AgentProcess, ProcessRole, ProcessScanner, same_dir};
 use crate::{SourceStatus, cursor, gemini, opencode};
 
 /// Full rescans (directory discovery, processes, integration status).
@@ -35,11 +35,22 @@ const MAX_SHOWN: usize = 60;
 /// A pause between two cycles longer than this means the system slept or
 /// the process was suspended.
 pub const RESUME_GAP: Millis = 2 * MINUTE;
+/// The wall clock going back by more than this disarms monitoring.
+pub const CLOCK_BACK_TOLERANCE: Millis = 5 * SECOND;
+/// Settled sessions quiet for longer than this are forgotten.
+const PRUNE_AFTER: Millis = 48 * HOUR;
+/// A rejected spool record keeps hook-based tools unobservable this long.
+const SPOOL_REJECT_HOLD: Millis = 5 * MINUTE;
+/// Spool records applied per cycle at most (the rest follows next cycle,
+/// while the verdict stays blocked by the backlog).
+const SPOOL_CYCLE_CAP: usize = 50_000;
+/// Read attempts before an unreadable spool record is set aside.
+const SPOOL_MAX_RETRIES: u32 = 3;
 
 pub enum ProcessSource {
     System(ProcessScanner),
-    /// Fixed list (tests, simulations).
-    Fixed(Result<Vec<AgentProcess>, String>),
+    /// Fixed list (tests, simulations); the flag simulates a running WSL VM.
+    Fixed(Result<Vec<AgentProcess>, String>, bool),
 }
 
 pub struct MonitorPaths {
@@ -68,6 +79,18 @@ pub struct Monitor {
     sources: BTreeMap<AgentKind, SourceStatus>,
     spool_error: Option<String>,
     spool_rejected: u64,
+    spool_rejected_at: Option<Millis>,
+    /// Records applied to the tracker, deleted by `commit_spool` once the
+    /// host persisted the state.
+    spool_done: Vec<PathBuf>,
+    spool_seen: BTreeSet<String>,
+    spool_retries: BTreeMap<String, u32>,
+    /// More records were waiting than one cycle may apply.
+    spool_backlog: bool,
+    /// Latest hook/plugin record per tool — proof that its integration runs.
+    hook_seen: BTreeMap<AgentKind, Millis>,
+    wsl_vm: bool,
+    environment: Vec<String>,
     integrations: BTreeMap<AgentKind, IntegrationStatus>,
     registry: Vec<RegistryEntry>,
     ignored_procs: BTreeSet<(u32, Millis)>,
@@ -126,6 +149,9 @@ pub struct Snapshot {
     pub sessions: Vec<SessionView>,
     pub adapters: Vec<AdapterView>,
     pub untracked: Vec<UntrackedProcess>,
+    /// Environment codes that block (`wsl_running`).
+    pub environment: Vec<String>,
+    pub watch_wsl: bool,
     pub last_power: Option<PowerRecord>,
     pub last_error: Option<String>,
     pub language: String,
@@ -137,7 +163,7 @@ impl Monitor {
         let claude = paths.claude_root.clone().map(|r| ClaudeAdapter::new(r, window));
         let codex = paths.codex_root.clone().map(|r| CodexAdapter::new(r, window));
         let controller = Controller::new(settings.action, settings.countdown());
-        let tracker = Tracker::new(TrackerConfig { settle: settings.settle() });
+        let tracker = Tracker::new(TrackerConfig { settle: settings.settle(), ..Default::default() });
         Self {
             settings,
             paths,
@@ -151,6 +177,14 @@ impl Monitor {
             sources: BTreeMap::new(),
             spool_error: None,
             spool_rejected: 0,
+            spool_rejected_at: None,
+            spool_done: Vec::new(),
+            spool_seen: BTreeSet::new(),
+            spool_retries: BTreeMap::new(),
+            spool_backlog: false,
+            hook_seen: BTreeMap::new(),
+            wsl_vm: false,
+            environment: Vec::new(),
             integrations: BTreeMap::new(),
             registry: Vec::new(),
             ignored_procs: BTreeSet::new(),
@@ -188,7 +222,7 @@ impl Monitor {
     /// Restores sessions persisted by a previous run (ignored flags, states
     /// of hook-only tools whose events were already consumed).
     pub fn restore(&mut self, mut tracker: Tracker) {
-        tracker.set_config(TrackerConfig { settle: self.settings.settle() });
+        tracker.set_config(TrackerConfig { settle: self.settings.settle(), ..Default::default() });
         self.tracker = tracker;
     }
 
@@ -229,6 +263,11 @@ impl Monitor {
         self.last_full = None;
     }
 
+    pub fn set_watch_wsl(&mut self, watch: bool) {
+        self.settings.watch_wsl = watch;
+        self.last_full = None;
+    }
+
     pub fn set_session_ignored(&mut self, key: &SessionKey, ignored: bool) -> bool {
         self.tracker.set_ignored(key, ignored)
     }
@@ -256,7 +295,37 @@ impl Monitor {
     }
 
     pub fn set_fixed_processes(&mut self, procs: Result<Vec<AgentProcess>, String>) {
-        self.procs = ProcessSource::Fixed(procs);
+        let wsl = matches!(self.procs, ProcessSource::Fixed(_, true));
+        self.procs = ProcessSource::Fixed(procs, wsl);
+    }
+
+    pub fn set_fixed_wsl(&mut self, running: bool) {
+        if let ProcessSource::Fixed(p, _) = &self.procs {
+            self.procs = ProcessSource::Fixed(p.clone(), running);
+        }
+    }
+
+    /// Spool records applied since the last commit. The host persists the
+    /// tracker first, then calls [`Monitor::commit_spool`].
+    pub fn has_uncommitted_spool(&self) -> bool {
+        !self.spool_done.is_empty()
+    }
+
+    /// Deletes spool records whose effect is now persisted.
+    pub fn commit_spool(&mut self) {
+        for path in std::mem::take(&mut self.spool_done) {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    self.spool_seen.remove(&name);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.spool_seen.remove(&name);
+                }
+                // Stays in spool_seen, so it is never applied twice.
+                Err(e) => tracing::warn!(path = %path.display(), error = %e, "could not remove spool record"),
+            }
+        }
     }
 
     // ---- the loop -------------------------------------------------------
@@ -265,9 +334,18 @@ impl Monitor {
     /// expired *and* a fresh full rescan still allows it.
     pub fn cycle(&mut self, now: Millis) -> Option<PowerAction> {
         if let Some(prev) = self.last_cycle.replace(now) {
-            if now - prev > RESUME_GAP || now < prev {
-                // Woke up from sleep (or the clock jumped): never act on a
-                // countdown that "expired" while the machine was off.
+            if now + CLOCK_BACK_TOLERANCE < prev {
+                // The wall clock went backwards: every comparison with older
+                // timestamps is meaningless now. Disarm and clamp.
+                if self.controller.disarm().is_some() {
+                    self.last_error = Some("clock_changed".into());
+                }
+                self.tracker.clamp_future(now);
+                self.last_full = None;
+                tracing::warn!(jump_ms = prev - now, "clock moved backwards, monitoring disarmed");
+            } else if now - prev > RESUME_GAP {
+                // Woke up from sleep: never act on a countdown that "expired"
+                // while the machine was off; only new completions count.
                 if self.controller.rearm_after_gap(now) {
                     tracing::warn!(gap_ms = now - prev, "time gap detected, countdown reset");
                 }
@@ -300,11 +378,13 @@ impl Monitor {
             events.extend(evs);
             self.sources.insert(AgentKind::Codex, st);
         }
-        events.retain(|e| self.settings.agent_enabled(e.agent));
+        // Events of disabled tools are still tracked (only the decision
+        // ignores them), so re-enabling a tool does not lose its state.
         self.tracker.apply_all(events, now);
         self.tracker.tick(now);
         if full {
             self.last_full = Some(now);
+            self.tracker.prune(now, PRUNE_AFTER);
             for agent in AgentKind::ALL {
                 self.integrations.insert(agent, integration::status(agent, &self.paths.integration));
             }
@@ -312,44 +392,96 @@ impl Monitor {
             self.attribute(now);
             spool::sweep_temp(&self.paths.spool_dir(), 10 * MINUTE);
         }
-        self.compute_health();
+        self.compute_health(now);
         self.verdict = self.evaluate(now);
     }
 
+    /// Applies every waiting hook record (bounded per cycle). Records are
+    /// only deleted later by [`Monitor::commit_spool`]; unreadable ones are
+    /// retried and finally moved to `spool/rejected`.
     fn drain_spool(&mut self, now: Millis) -> Vec<AgentEvent> {
         let dir = self.paths.spool_dir();
-        let batch = match spool::read_batch(&dir) {
-            Ok(b) => {
-                self.spool_error = None;
-                b
-            }
-            Err(e) => {
-                self.spool_error = Some(e.to_string());
-                return Vec::new();
-            }
-        };
         let mut events = Vec::new();
-        for entry in batch {
-            match entry.record {
-                Ok(rec) => events.extend(normalize(&rec)),
+        let mut applied = 0usize;
+        let mut failed_this_cycle = BTreeSet::new();
+        self.spool_backlog = false;
+        loop {
+            let seen = &self.spool_seen;
+            let skip = &failed_this_cycle;
+            let batch = match spool::read_batch_filtered(&dir, |n| !seen.contains(n) && !skip.contains(n)) {
+                Ok(b) => {
+                    self.spool_error = None;
+                    b
+                }
                 Err(e) => {
-                    self.spool_rejected += 1;
-                    tracing::warn!(path = %entry.path.display(), error = %e, "rejected spool record");
+                    self.spool_error = Some(e.to_string());
+                    break;
+                }
+            };
+            if batch.is_empty() {
+                break;
+            }
+            for entry in batch {
+                let name = entry.path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+                match entry.record {
+                    Ok(rec) => {
+                        let agent = if cursor::looks_like_cursor(&rec.payload) {
+                            Some(AgentKind::Cursor)
+                        } else {
+                            AgentKind::from_id(&rec.agent)
+                        };
+                        if let Some(agent) = agent {
+                            let seen_at = self.hook_seen.entry(agent).or_insert(rec.received_at);
+                            *seen_at = (*seen_at).max(rec.received_at);
+                        }
+                        events.extend(normalize(&rec));
+                        self.spool_retries.remove(&name);
+                        self.spool_seen.insert(name);
+                        self.spool_done.push(entry.path);
+                        applied += 1;
+                    }
+                    Err(e) => {
+                        let tries = self.spool_retries.entry(name.clone()).or_insert(0);
+                        *tries += 1;
+                        if *tries >= SPOOL_MAX_RETRIES {
+                            self.spool_retries.remove(&name);
+                            self.reject_spool_file(&entry.path, now);
+                            tracing::warn!(path = %entry.path.display(), error = %e, "spool record rejected");
+                        }
+                        failed_this_cycle.insert(name);
+                    }
                 }
             }
-            if let Err(e) = fs::remove_file(&entry.path) {
-                // Leave it; a duplicate replay is harmless (old events are not fresh).
-                tracing::warn!(path = %entry.path.display(), error = %e, "could not remove spool record");
+            if applied >= SPOOL_CYCLE_CAP {
+                self.spool_backlog = true;
+                break;
             }
         }
-        let _ = now;
         events
+    }
+
+    fn reject_spool_file(&mut self, path: &Path, now: Millis) {
+        self.spool_rejected += 1;
+        self.spool_rejected_at = Some(now);
+        let dir = self.paths.spool_dir().join("rejected");
+        let moved =
+            fs::create_dir_all(&dir).is_ok() && path.file_name().is_some_and(|n| fs::rename(path, dir.join(n)).is_ok());
+        if !moved {
+            let _ = fs::remove_file(path);
+        }
     }
 
     fn scan_processes(&mut self) {
         let result = match &mut self.procs {
-            ProcessSource::System(s) => s.scan(),
-            ProcessSource::Fixed(r) => r.clone(),
+            ProcessSource::System(s) => {
+                let r = s.scan();
+                self.wsl_vm = s.wsl_vm();
+                r
+            }
+            ProcessSource::Fixed(r, wsl) => {
+                self.wsl_vm = *wsl;
+                r.clone()
+            }
         };
         match result {
             Ok(p) => {
@@ -381,8 +513,13 @@ impl Monitor {
                 if !start_matches(proc_.start_time, entry.started_at) {
                     continue;
                 }
-                claude_pids.insert(entry.pid);
                 let key = SessionKey::new(AgentKind::ClaudeCode, entry.session_id.clone());
+                // A registered process counts as attributed only if we track
+                // its session, or Claude Code itself says it is idle.
+                let tracked = self.tracker.get(&key).is_some();
+                if tracked || entry.status.as_deref() == Some("idle") {
+                    claude_pids.insert(entry.pid);
+                }
                 let origin = entry.entrypoint.as_deref().map(origin_from_entrypoint);
                 self.tracker.annotate(&key, Some(entry.pid), origin.as_deref(), entry.cwd.as_deref());
             }
@@ -413,21 +550,52 @@ impl Monitor {
             }
         }
 
-        // Hook/plugin-only tools: processes that started before the
-        // integration was installed cannot have loaded it.
+        // Hook/plugin-only tools: a process counts as observed only if it
+        // started after the integration was installed *and* a hook record of
+        // that tool arrived since it started (the integration demonstrably
+        // runs in it).
         for agent in [AgentKind::GeminiCli, AgentKind::Cursor, AgentKind::OpenCode] {
             if !enabled(agent) {
                 continue;
             }
             let Some(st) = self.integrations.get(&agent).filter(|s| s.installed) else { continue };
             let since = st.installed_at.unwrap_or(0);
-            for p in self.processes.iter().filter(|p| p.agent == agent && p.start_time + 5 * SECOND < since) {
-                self.untracked.push(untracked(p, &self.ignored_procs));
+            let seen = self.hook_seen.get(&agent).copied().unwrap_or(Millis::MIN);
+            for p in self.processes.iter().filter(|p| p.agent == agent) {
+                let predates_install = p.start_time + 5 * SECOND < since;
+                let silent = seen + 5 * SECOND < p.start_time;
+                if predates_install || silent {
+                    self.untracked.push(untracked(p, &self.ignored_procs));
+                }
             }
+        }
+
+        // Codex: a CLI/exec process is attributed when a tracked rollout of
+        // its directory (or any rollout, if the directory is unreadable) was
+        // active since the process started.
+        if enabled(AgentKind::Codex) {
+            for p in self.processes.iter().filter(|p| p.agent == AgentKind::Codex && p.role == ProcessRole::Session) {
+                let covered = self.tracker.sessions().any(|s| {
+                    s.key.agent == AgentKind::Codex
+                        && s.last_activity + 5 * SECOND >= p.start_time
+                        && match (&p.cwd, &s.cwd) {
+                            (Some(pc), Some(sc)) => same_dir(pc, sc),
+                            _ => true,
+                        }
+                });
+                if !covered {
+                    self.untracked.push(untracked(p, &self.ignored_procs));
+                }
+            }
+        }
+
+        self.environment.clear();
+        if self.settings.watch_wsl && self.wsl_vm {
+            self.environment.push("wsl_running".into());
         }
     }
 
-    fn compute_health(&mut self) {
+    fn compute_health(&mut self, now: Millis) {
         self.health.clear();
         for agent in AgentKind::ALL {
             if !self.settings.agent_enabled(agent) {
@@ -479,9 +647,15 @@ impl Monitor {
                     }
                 }
             };
-            if agent == AgentKind::ClaudeCode && installed && h.observable {
+            let uses_spool = installed && agent != AgentKind::Codex;
+            let recently_rejected = self.spool_rejected_at.is_some_and(|t| now - t < SPOOL_REJECT_HOLD);
+            if uses_spool && h.observable {
                 if let Some(e) = &self.spool_error {
                     h = AdapterHealth::unobservable(agent, "spool_error", Some(e.clone()));
+                } else if recently_rejected {
+                    h = AdapterHealth::unobservable(agent, "spool_error", Some("rejected record".into()));
+                } else if self.spool_backlog {
+                    h = AdapterHealth::unobservable(agent, "spool_backlog", None);
                 }
             }
             if agent != AgentKind::Codex && h.observable {
@@ -509,6 +683,7 @@ impl Monitor {
                 sessions: &sessions,
                 health: &self.health,
                 untracked: &self.untracked,
+                environment: &self.environment,
                 alive: &alive,
             },
             &PolicyConfig { relevance_window: self.settings.relevance_window() },
@@ -566,6 +741,8 @@ impl Monitor {
             sessions,
             adapters,
             untracked: self.untracked.clone(),
+            environment: self.environment.clone(),
+            watch_wsl: self.settings.watch_wsl,
             last_power: self.last_power.clone(),
             last_error: self.last_error.clone(),
             language: self.settings.language.clone(),

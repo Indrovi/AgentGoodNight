@@ -138,6 +138,13 @@ pub enum EventKind {
         /// Replaces whatever was inferred from other sources.
         pending: Option<PendingWork>,
     },
+    /// End of turn inferred from a log entry that does not prove the tool's
+    /// own stop hooks have finished (Claude Code's final `end_turn` message
+    /// when no `stop_hook_summary` follows). Uses the long inferred settle
+    /// window; a later confirmed `TurnCompleted` replaces it.
+    TurnEndInferred,
+    /// The last recurring job the session had announced was deleted.
+    ContinuationCancelled,
     /// A goal / objective that auto-continues the session was set or
     /// cleared (`/goal` in Claude Code, thread goals in Codex).
     GoalStatus {

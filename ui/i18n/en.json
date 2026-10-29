@@ -21,6 +21,7 @@
   "status.countdown.shutdown": "Shutting down in {time}",
   "status.countdownHint": "All tracked tasks are complete. New activity cancels the countdown.",
   "status.verifying": "Re-checking every session right before acting…",
+  "status.environment": "Agents out of reach cannot be verified – action blocked",
   "status.cancel": "Cancel",
   "status.done.sleep": "Sleep requested at {time}",
   "status.done.shutdown": "Shutdown requested at {time}",
@@ -75,6 +76,9 @@
   "reason.stream_error": "connection lost",
   "reason.quota_auto_resume_stale": "waits for Enter after limit",
 
+  "reason.history_unknown": "older history unknown – connect hooks",
+  "env.wsl_running": "WSL is running – agents inside cannot be tracked",
+  "error.clock_changed": "System clock moved backwards – monitoring switched off",
   "untracked.title": "Untracked process",
   "untracked.ignore": "Ignore",
   "untracked.ignored": "ignored",
@@ -97,6 +101,8 @@
   "settings.done": "Done. Backup: {backup}",
   "settings.doneNoBackup": "Done.",
   "settings.failed": "Failed: {error}",
+  "settings.watchWsl": "Block while WSL is running",
+  "settings.watchWslHint": "Agents inside WSL are not visible from Windows. Turn off if you never run agents in WSL.",
   "settings.processes": "processes: {n}",
 
   "adapter.disabled": "Not tracked",
@@ -109,6 +115,7 @@
   "adapter.no_data_dir": "Tool data not found – blocks",
   "adapter.read_error": "Read error – blocks",
   "adapter.spool_error": "Spool error – blocks",
+  "adapter.spool_backlog": "Processing event backlog – blocks",
   "adapter.process_scan_failed": "Cannot list processes – blocks",
   "adapter.pending": "Loading…",
 

@@ -117,6 +117,16 @@ impl Engine {
                 }
             }
         };
+        {
+            let mut m = self.monitor();
+            if m.has_uncommitted_spool() {
+                // Hook records are deleted only after their effect is saved.
+                match m.save_state(&paths::state_path()) {
+                    Ok(()) => m.commit_spool(),
+                    Err(e) => tracing::warn!(error = %e, "could not persist sessions; keeping spool records"),
+                }
+            }
+        }
         if let Some(action) = action {
             tracing::warn!(?action, backend = ?self.power.backend(), "all checks passed twice, executing power action");
             let result = self.power.execute(action).map_err(|e| e.to_string());

@@ -200,6 +200,7 @@ button { font: inherit; color: inherit; }
 .adapter .status-line.bad { color: #ffb0b0; }
 .adapter .status-line.ok { color: #9fe3bd; }
 .adapter-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.env-row { gap: 12px; padding: 2px 2px 0; }
 .lang-row select {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: inherit;
 }

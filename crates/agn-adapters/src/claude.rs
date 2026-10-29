@@ -26,8 +26,11 @@ use crate::tail::{FileTail, list_files, mtime_millis, newest_mtime};
 use crate::{SourceStatus, str_field};
 
 const AGENT: AgentKind = AgentKind::ClaudeCode;
-const INITIAL_WINDOW: u64 = 4 * 1024 * 1024;
-const GOAL_SCAN_WINDOW: u64 = 32 * 1024 * 1024;
+/// First read of a transcript parses this much of its end. Anything announced
+/// before it (background jobs, crons) is unknown and blocks until a Stop hook
+/// reports the authoritative pending work.
+const INITIAL_WINDOW: u64 = 32 * 1024 * 1024;
+const GOAL_SCAN_WINDOW: u64 = 64 * 1024 * 1024;
 
 /// `CLAUDE_CONFIG_DIR` or `~/.claude`.
 pub fn default_root() -> Option<PathBuf> {
@@ -44,6 +47,8 @@ pub struct RegistryEntry {
     pub started_at: Option<Millis>,
     pub entrypoint: Option<String>,
     pub cwd: Option<String>,
+    /// `busy` / `idle` as written by Claude Code; only used as a veto.
+    pub status: Option<String>,
 }
 
 #[derive(Debug)]
@@ -97,16 +102,26 @@ impl ClaudeAdapter {
             let first = !t.parser.started;
             match t.tail.read_new(INITIAL_WINDOW) {
                 Ok(read) => {
+                    let start = events.len();
                     if first {
                         t.parser.started = true;
-                        if read.from_middle {
-                            if let Some(ev) = scan_last_goal(path, &t.session_id) {
-                                events.push(ev);
-                            }
-                        }
                     }
                     for line in &read.lines {
                         t.parser.parse(&t.session_id, line, &mut events);
+                    }
+                    if first && read.from_middle {
+                        // History before the window is unknown: keep the
+                        // session from completing until a Stop hook reports
+                        // the authoritative pending work.
+                        let earliest = events[start..].iter().map(|e| e.at).min().unwrap_or(read.mtime);
+                        events.push(t.parser.event(
+                            &t.session_id,
+                            earliest - 1,
+                            EventKind::BackgroundStarted { id: agn_core::tracker::HISTORY_UNKNOWN.into() },
+                        ));
+                        if let Some(ev) = scan_last_goal(path, &t.session_id) {
+                            events.push(ev);
+                        }
                     }
                     if read.grew && read.lines.is_empty() {
                         events.push(t.parser.event(&t.session_id, read.mtime, EventKind::Heartbeat));
@@ -213,6 +228,7 @@ pub fn read_registry(dir: &Path) -> Vec<RegistryEntry> {
             started_at: v.get("startedAt").and_then(Value::as_i64),
             entrypoint: str_field(&v, "entrypoint").map(str::to_string),
             cwd: str_field(&v, "cwd").map(str::to_string),
+            status: str_field(&v, "status").map(str::to_string),
         });
     }
     out
@@ -236,6 +252,8 @@ pub struct LineParser {
     /// tool_use id -> tool name, for launches that may run in background.
     bg_candidates: BTreeMap<String, String>,
     seen_task_ids: BTreeSet<String>,
+    /// Recurring crons created within the observed part of the transcript.
+    crons: u32,
 }
 
 const TERMINAL_TASK_STATUS: &[&str] = &[
@@ -457,7 +475,16 @@ impl LineParser {
                 }
                 "CronCreate" => {
                     let recurring = input.get("recurring").and_then(Value::as_bool).unwrap_or(true);
+                    if recurring {
+                        self.crons += 1;
+                    }
                     kinds.push(EventKind::ContinuationScheduled { recurring });
+                }
+                "CronDelete" if self.crons > 0 => {
+                    self.crons -= 1;
+                    if self.crons == 0 {
+                        kinds.push(EventKind::ContinuationCancelled);
+                    }
                 }
                 _ => {}
             }
@@ -472,14 +499,16 @@ impl LineParser {
         }
         // Without configured Stop hooks Claude Code writes no
         // stop_hook_summary; the final end_turn message is then the only
-        // end-of-turn record. A blocking stop hook (preventedContinuation)
-        // or any later entry revives the session, so this is safe either way.
+        // end-of-turn record. It does not prove that Stop hooks finished, so
+        // it only counts as an *inferred* end with the long settle window;
+        // a later stop_hook_summary confirms or (preventedContinuation)
+        // revives the session.
         let message = v.get("message");
         let stop_reason = message.and_then(|m| str_field(m, "stop_reason"));
         let synthetic = message.and_then(|m| str_field(m, "model")) == Some("<synthetic>");
         let used_tool = items.into_iter().flatten().any(|i| str_field(i, "type") == Some("tool_use"));
         if stop_reason == Some("end_turn") && !synthetic && !used_tool {
-            kinds.push(EventKind::TurnCompleted { continuing: false, pending: None });
+            kinds.push(EventKind::TurnEndInferred);
         }
         kinds
     }
@@ -660,7 +689,14 @@ pub fn pending_from_stop(p: &Value) -> Option<PendingWork> {
         return None;
     }
     let mut pending = PendingWork::default();
-    for (i, t) in tasks.and_then(Value::as_array).into_iter().flatten().enumerate() {
+    let truncated = |v: &Value| v.get("truncated").and_then(Value::as_bool).unwrap_or(false);
+    let any_truncated = tasks.and_then(Value::as_array).into_iter().flatten().any(truncated)
+        || crons.and_then(Value::as_array).into_iter().flatten().any(truncated);
+    if any_truncated {
+        pending.background.push(agn_core::tracker::SNAPSHOT_TRUNCATED.to_string());
+        pending.recurring = true;
+    }
+    for (i, t) in tasks.and_then(Value::as_array).into_iter().flatten().filter(|t| !truncated(t)).enumerate() {
         let status = str_field(t, "status").unwrap_or("").to_lowercase();
         if TERMINAL_TASK_STATUS.contains(&status.as_str()) {
             continue;
@@ -668,7 +704,7 @@ pub fn pending_from_stop(p: &Value) -> Option<PendingWork> {
         let id = str_field(t, "id").map(str::to_string).unwrap_or_else(|| format!("task#{i}"));
         pending.background.push(id);
     }
-    for c in crons.and_then(Value::as_array).into_iter().flatten() {
+    for c in crons.and_then(Value::as_array).into_iter().flatten().filter(|c| !truncated(c)) {
         if c.get("recurring").and_then(Value::as_bool).unwrap_or(true) {
             pending.recurring = true;
         } else {
@@ -718,7 +754,7 @@ mod tests {
     }
 
     fn run(lines: &[Value], settle_until: Millis) -> SessionState {
-        let mut t = Tracker::new(TrackerConfig { settle: 1_000 });
+        let mut t = Tracker::new(TrackerConfig { settle: 1_000, ..Default::default() });
         let now = 4_000_000_000_000;
         t.apply_all(parse_all(lines), now);
         t.tick(settle_until);
@@ -1005,7 +1041,7 @@ mod notification_tests {
             })
             .collect();
         assert_eq!(started, vec!["a5031b0a29c4f689b", "be4w3nxaq"], "foreground agent not counted");
-        let mut t = Tracker::new(TrackerConfig { settle: 1_000 });
+        let mut t = Tracker::new(TrackerConfig { settle: 1_000, ..Default::default() });
         t.apply_all(evs, 4_000_000_000_000);
         t.tick(4_000_000_000_000);
         let s = t.get(&agn_core::SessionKey::new(AGENT, "s")).unwrap();

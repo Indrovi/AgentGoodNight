@@ -32,6 +32,7 @@ pub fn run() {
             commands::set_session_ignored,
             commands::ignore_process,
             commands::set_agent_enabled,
+            commands::set_watch_wsl,
             commands::install_integration,
             commands::uninstall_integration,
         ])

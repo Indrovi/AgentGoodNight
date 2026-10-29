@@ -52,7 +52,10 @@ function write(payload) {
   } catch (_) { /* never disturb OpenCode */ }
 }
 
-export const AgentGoodNight = async ({ directory }) => ({
+export const AgentGoodNight = async ({ directory }) => {
+  // Proves to AgentGoodNight that the plugin runs in this OpenCode process.
+  write({ event: "plugin.loaded", sessionID: null, directory: directory || null });
+  return {
   event: async ({ event }) => {
     if (!event || !WANTED.has(event.type)) return;
     const p = event.properties || {};
@@ -66,7 +69,8 @@ export const AgentGoodNight = async ({ directory }) => ({
       error: p.error ? { name: p.error.name } : null,
     });
   },
-});
+  };
+};
 "#;
 
 pub fn plugin_source(spool_dir: &std::path::Path) -> String {

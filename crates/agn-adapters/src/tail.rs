@@ -14,7 +14,8 @@ use std::time::UNIX_EPOCH;
 use agn_core::Millis;
 
 /// Upper bound read from a plain file per poll; the rest follows next poll.
-const MAX_CHUNK: u64 = 8 * 1024 * 1024;
+/// Larger than the biggest initial window, so a first read is never split.
+const MAX_CHUNK: u64 = 64 * 1024 * 1024;
 /// Compressed files larger than this are not decoded.
 const MAX_ZST: u64 = 1024 * 1024 * 1024;
 
@@ -210,6 +211,34 @@ fn push_line(out: &mut Vec<String>, raw: &[u8]) {
         return;
     }
     out.push(String::from_utf8_lossy(raw).into_owned());
+}
+
+/// Last line of the whole file (plain or zstd) that contains `needle`.
+/// Streams the file, so memory stays bounded by the longest line.
+pub fn last_line_containing(path: &Path, needle: &str) -> Option<String> {
+    let needle = needle.as_bytes();
+    let contains = |l: &[u8]| l.windows(needle.len()).any(|w| w == needle);
+    let mut last: Option<Vec<u8>> = None;
+    let file = File::open(path).ok()?;
+    let reader = std::io::BufReader::with_capacity(1 << 20, file);
+    if path.extension().is_some_and(|e| e == "zst") {
+        for_each_zstd_line(reader, |l| {
+            if contains(l) {
+                last = Some(l.to_vec());
+            }
+            true
+        })
+        .ok()?;
+    } else {
+        use std::io::BufRead;
+        for line in reader.split(b'\n') {
+            let line = line.ok()?;
+            if contains(&line) {
+                last = Some(line);
+            }
+        }
+    }
+    last.map(|l| String::from_utf8_lossy(&l).trim_end_matches('\r').to_string())
 }
 
 /// Lists files under `dir` (non-recursive) matching `pred`, with metadata.

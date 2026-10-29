@@ -29,11 +29,15 @@ pub struct AgentProcess {
     pub name: String,
     pub role: ProcessRole,
     pub origin: Option<String>,
+    /// Working directory, when the OS lets us read it.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 #[derive(Default)]
 pub struct ProcessScanner {
     sys: Option<Box<System>>,
+    wsl_vm: bool,
 }
 
 impl ProcessScanner {
@@ -41,19 +45,29 @@ impl ProcessScanner {
         Self::default()
     }
 
+    /// Whether the last scan saw a running WSL 2 virtual machine.
+    pub fn wsl_vm(&self) -> bool {
+        self.wsl_vm
+    }
+
     pub fn scan(&mut self) -> Result<Vec<AgentProcess>, String> {
         if self.sys.is_none() {
             self.sys = Some(Box::new(System::new().map_err(|e| e.to_string())?));
         }
         let sys = self.sys.as_mut().ok_or("process scanner unavailable")?;
-        let kind = ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet).with_cmd(UpdateKind::OnlyIfNotSet);
+        let kind = ProcessRefreshKind::nothing()
+            .with_exe(UpdateKind::OnlyIfNotSet)
+            .with_cmd(UpdateKind::OnlyIfNotSet)
+            .with_cwd(UpdateKind::OnlyIfNotSet);
         let n = sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
         if n == 0 && sys.processes().is_empty() {
             return Err("process list is empty".into());
         }
         let mut out = Vec::new();
+        let mut wsl_vm = false;
         for (pid, p) in sys.processes() {
             let name = p.name().to_string_lossy().to_string();
+            wsl_vm |= is_wsl_vm(&name);
             let cmd: Vec<String> = p.cmd().iter().map(|s| s.to_string_lossy().to_string()).collect();
             if let Some((agent, role, origin)) = classify(&name, p.exe(), &cmd) {
                 out.push(AgentProcess {
@@ -63,12 +77,30 @@ impl ProcessScanner {
                     name,
                     role,
                     origin,
+                    cwd: p.cwd().map(|c| c.to_string_lossy().into_owned()).filter(|c| !c.is_empty()),
                 });
             }
         }
+        self.wsl_vm = wsl_vm;
         out.sort_by_key(|p| (p.agent, p.pid));
         Ok(out)
     }
+}
+
+/// The utility VM that hosts every WSL 2 distribution (Windows 11: VmmemWSL).
+pub fn is_wsl_vm(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n == "vmmemwsl" || n == "vmmemwsl.exe"
+}
+
+/// Compares directories the way the OS does (case-insensitive on Windows).
+pub fn same_dir(a: &str, b: &str) -> bool {
+    let norm = |p: &str| {
+        let p = p.replace('\\', "/");
+        let p = p.trim_end_matches('/').to_string();
+        if cfg!(windows) { p.to_lowercase() } else { p }
+    };
+    norm(a) == norm(b)
 }
 
 /// Maps a process to an agent. Pure, so it is unit-tested on all platforms.
@@ -191,6 +223,16 @@ mod tests {
         assert_eq!(c("cursor-agent", "/usr/bin/cursor-agent", &[]), Some((AgentKind::Cursor, ProcessRole::Session)));
         assert_eq!(c("opencode", "/usr/bin/opencode", &[]), Some((AgentKind::OpenCode, ProcessRole::Session)));
         assert_eq!(c("explorer.exe", r"C:\Windows\explorer.exe", &[]), None);
+    }
+
+    #[test]
+    fn wsl_and_dirs() {
+        assert!(is_wsl_vm("VmmemWSL"));
+        assert!(!is_wsl_vm("vmmem"));
+        assert!(same_dir("/work/api/", "/work/api"));
+        if cfg!(windows) {
+            assert!(same_dir(r"C:\Work\API", "c:/work/api"));
+        }
     }
 
     #[test]

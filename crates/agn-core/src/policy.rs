@@ -63,9 +63,22 @@ pub struct UntrackedProcess {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BlockReason {
-    SessionActive { key: SessionKey, state: SessionState },
-    AdapterUnobservable { agent: AgentKind, code: String },
-    UntrackedProcess { agent: AgentKind, pid: u32 },
+    SessionActive {
+        key: SessionKey,
+        state: SessionState,
+    },
+    AdapterUnobservable {
+        agent: AgentKind,
+        code: String,
+    },
+    UntrackedProcess {
+        agent: AgentKind,
+        pid: u32,
+    },
+    /// Agents could be running somewhere we cannot look into (e.g. a WSL VM).
+    EnvironmentUnobservable {
+        code: String,
+    },
     NoCompletionRecorded,
 }
 
@@ -89,6 +102,8 @@ pub struct PolicyInput<'a> {
     pub sessions: &'a [&'a Session],
     pub health: &'a [AdapterHealth],
     pub untracked: &'a [UntrackedProcess],
+    /// Codes of environments that may run unobservable agents (wsl_running).
+    pub environment: &'a [String],
     /// Sessions whose owning process is currently known to be alive.
     pub alive: &'a dyn Fn(&Session) -> bool,
 }
@@ -119,6 +134,10 @@ pub fn evaluate(input: &PolicyInput<'_>, cfg: &PolicyConfig) -> Verdict {
         }
     }
 
+    for code in input.environment {
+        reasons.push(BlockReason::EnvironmentUnobservable { code: code.clone() });
+    }
+
     let mut completed = Vec::new();
     for s in input.sessions {
         let alive = (input.alive)(s);
@@ -127,7 +146,7 @@ pub fn evaluate(input: &PolicyInput<'_>, cfg: &PolicyConfig) -> Verdict {
         }
         if s.state.is_blocking() {
             reasons.push(BlockReason::SessionActive { key: s.key.clone(), state: s.state });
-        } else if s.completed_at.is_some_and(|t| t >= armed_at) {
+        } else if s.completed_at.is_some_and(|t| t >= armed_at && t <= input.now) {
             completed.push(s.key.clone());
         }
     }

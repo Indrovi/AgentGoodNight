@@ -74,7 +74,7 @@ impl World {
             integration: env,
         };
         let settings = Settings { settle_secs: 15, countdown_secs: 10, ..Settings::default() };
-        let monitor = Monitor::new(settings, paths, ProcessSource::Fixed(Ok(vec![])), PowerBackend::DryRun);
+        let monitor = Monitor::new(settings, paths, ProcessSource::Fixed(Ok(vec![]), false), PowerBackend::DryRun);
         Self { _dir: dir, root, t0: now_millis(), monitor, procs: vec![] }
     }
 
@@ -122,7 +122,15 @@ impl World {
     }
 
     fn add_proc(&mut self, agent: AgentKind, pid: u32, role: ProcessRole, start: Millis) {
-        self.procs.push(AgentProcess { agent, pid, start_time: start, name: format!("{agent:?}"), role, origin: None });
+        self.procs.push(AgentProcess {
+            agent,
+            pid,
+            start_time: start,
+            name: format!("{agent:?}"),
+            role,
+            origin: None,
+            cwd: None,
+        });
         self.monitor.set_fixed_processes(Ok(self.procs.clone()));
         self.monitor.invalidate();
     }
@@ -131,7 +139,9 @@ impl World {
     fn run_until(&mut self, from: i64, to: i64) -> Vec<PowerAction> {
         let mut out = Vec::new();
         for s in from..=to {
-            if let Some(a) = self.monitor.cycle(self.at(s)) {
+            let action = self.monitor.cycle(self.at(s));
+            self.monitor.commit_spool();
+            if let Some(a) = action {
                 self.monitor.record_power(Ok(agn_core::power::PowerRecord {
                     at: self.at(s),
                     action: a,
@@ -239,9 +249,20 @@ fn cursor_with_hooks_and_a_pre_install_process() {
     // User restarts Cursor: the old process is gone, a new one started after install.
     w.procs.clear();
     w.add_proc(AgentKind::Cursor, 5001, ProcessRole::Editor, now_millis() + 10 * SECOND);
-    let actions = w.run_until(121, 160);
+    assert!(w.run_until(121, 140).is_empty(), "no hook record since the restart: integration unproven");
+    assert!(w.reasons().iter().any(|r| matches!(r, BlockReason::UntrackedProcess { pid: 5001, .. })));
+    // The restarted editor runs its hooks (workspaceOpen) — now it is observed.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    w.procs.clear();
+    w.add_proc(AgentKind::Cursor, 5001, ProcessRole::Editor, now_millis());
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    w.hook(
+        "cursor",
+        json!({"conversation_id":"","generation_id":"","hook_event_name":"workspaceOpen","cursor_version":"2.1"}),
+    );
+    let actions = w.run_until(141, 180);
     assert_eq!(actions, vec![PowerAction::Sleep]);
-    let snap = w.monitor.snapshot(w.at(160));
+    let snap = w.monitor.snapshot(w.at(180));
     let k1 = snap.sessions.iter().find(|s| s.id == "k1").unwrap();
     assert_eq!(k1.project.as_deref(), Some("site"));
 }
