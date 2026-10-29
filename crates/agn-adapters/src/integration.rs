@@ -131,19 +131,15 @@ const CLAUDE_EVENTS: &[(&str, bool)] = &[
     ("SessionEnd", false),
 ];
 
+// Gemini runs hooks synchronously (~0.3 s PowerShell start on Windows), so
+// only the events the mapping needs: AfterTool alone marks tool activity.
 const GEMINI_EVENTS: &[&str] =
-    &["SessionStart", "SessionEnd", "BeforeAgent", "AfterAgent", "BeforeTool", "AfterTool", "Notification"];
+    &["SessionStart", "SessionEnd", "BeforeAgent", "AfterAgent", "AfterTool", "Notification"];
 
-const CURSOR_EVENTS: &[&str] = &[
-    "workspaceOpen",
-    "sessionStart",
-    "sessionEnd",
-    "beforeSubmitPrompt",
-    "postToolUse",
-    "afterAgentResponse",
-    "subagentStart",
-    "stop",
-];
+// Never a permission hook (`preToolUse`, `subagentStart`, `before*Execution`,
+// ...): an empty answer there may deny the agent's action.
+const CURSOR_EVENTS: &[&str] =
+    &["workspaceOpen", "sessionStart", "sessionEnd", "beforeSubmitPrompt", "postToolUse", "stop"];
 
 pub fn status(agent: AgentKind, env: &IntegrationEnv) -> IntegrationStatus {
     let path = env.config_path(agent);
@@ -175,8 +171,12 @@ pub fn install(agent: AgentKind, env: &IntegrationEnv) -> Result<Option<PathBuf>
         return Err(IntegrationError::Unsupported(agent));
     }
     let hook = if agent == AgentKind::OpenCode { None } else { Some(deploy_hook(env)?) };
+    // The hook only writes into an existing spool (Cursor may also run the
+    // Claude hooks without their arguments, relying on that).
+    fs::create_dir_all(&env.spool_dir)?;
     // Parse before backing up so an unreadable config aborts untouched.
     let existing = if hook.is_some() { read_json(&path)? } else { None };
+    let created = !path.exists() || created_by_us(agent, env);
     let backup = backup(&path, env)?;
     match hook {
         None => {
@@ -195,12 +195,22 @@ pub fn install(agent: AgentKind, env: &IntegrationEnv) -> Result<Option<PathBuf>
             write_json(&path, &root)?;
         }
     }
-    write_atomic(&env.marker(agent), json!({"installed_at": now_millis()}).to_string().as_bytes())?;
+    write_atomic(&env.marker(agent), json!({"installed_at": now_millis(), "created": created}).to_string().as_bytes())?;
     Ok(backup)
+}
+
+/// Whether the config file did not exist before we first installed into it.
+fn created_by_us(agent: AgentKind, env: &IntegrationEnv) -> bool {
+    fs::read(env.marker(agent))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.get("created").and_then(Value::as_bool))
+        .unwrap_or(false)
 }
 
 pub fn uninstall(agent: AgentKind, env: &IntegrationEnv) -> Result<Option<PathBuf>, IntegrationError> {
     let path = env.config_path(agent).ok_or(IntegrationError::Unsupported(agent))?;
+    let created = created_by_us(agent, env);
     let _ = fs::remove_file(env.marker(agent));
     if !path.exists() {
         return Ok(None);
@@ -216,7 +226,16 @@ pub fn uninstall(agent: AgentKind, env: &IntegrationEnv) -> Result<Option<PathBu
         _ => {
             if let Some(mut root) = read_json(&path)? {
                 if remove_our_hooks(&mut root) {
-                    write_json(&path, &root)?;
+                    // A file we created and that holds nothing else goes away
+                    // again (Cursor: `{"version": 1}` is all we added).
+                    let leftover = root.as_object().is_none_or(|o| {
+                        o.is_empty() || (agent == AgentKind::Cursor && o.len() == 1 && o.contains_key("version"))
+                    });
+                    if created && leftover {
+                        fs::remove_file(&path)?;
+                    } else {
+                        write_json(&path, &root)?;
+                    }
                 }
             }
         }
@@ -367,11 +386,21 @@ fn add_hooks(agent: AgentKind, root: &mut Value, hook: &Path, data_dir: &Path) {
             }
         }
         AgentKind::GeminiCli => {
+            // Gemini runs hook commands through PowerShell on Windows (bash
+            // elsewhere). PowerShell does not wait for a GUI-subsystem
+            // binary unless its output is consumed: `| Out-Null`.
+            let command = if cfg!(windows) {
+                let q = |s: &str| s.replace('\'', "''");
+                format!("& '{}' gemini_cli --data-dir '{}' | Out-Null", q(&hook_s), q(&data_s))
+            } else {
+                let q = |s: &str| s.replace('\'', "'\\''");
+                format!("'{}' gemini_cli --data-dir '{}'", q(&hook_s), q(&data_s))
+            };
             for event in GEMINI_EVENTS {
                 let handler = json!({
                     "type": "command",
                     "name": "agentgoodnight",
-                    "command": format!("\"{hook_s}\" gemini_cli --data-dir \"{data_s}\""),
+                    "command": command,
                     "timeout": 10000,
                     "description": "AgentGoodNight lifecycle monitor (no effect on the agent)",
                 });
@@ -379,10 +408,11 @@ fn add_hooks(agent: AgentKind, root: &mut Value, hook: &Path, data_dir: &Path) {
             }
         }
         AgentKind::Cursor => {
-            // Cursor runs hook commands through PowerShell on Windows.
+            // Cursor runs hook commands through PowerShell on Windows; piping
+            // makes it wait for the hook and still pass `{}` on.
             let command = if cfg!(windows) {
                 let q = |s: &str| s.replace('\'', "''");
-                format!("& '{}' cursor --data-dir '{}'", q(&hook_s), q(&data_s))
+                format!("& '{}' cursor --data-dir '{}' | Write-Output", q(&hook_s), q(&data_s))
             } else {
                 let q = |s: &str| s.replace('\'', "'\\''");
                 format!("'{}' cursor --data-dir '{}'", q(&hook_s), q(&data_s))
@@ -478,12 +508,46 @@ mod tests {
         assert_eq!(install(AgentKind::GeminiCli, &env).unwrap(), None);
         let p = dir.path().join(".gemini/settings.json");
         let v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
-        assert!(
-            v["hooks"]["AfterAgent"][0]["hooks"][0]["command"].as_str().unwrap().contains("\" gemini_cli --data-dir")
-        );
+        let cmd = v["hooks"]["AfterAgent"][0]["hooks"][0]["command"].as_str().unwrap();
+        // Verified with Gemini CLI 0.66: a quoted path followed by arguments
+        // is a PowerShell parse error, so Windows needs the call operator.
+        if cfg!(windows) {
+            assert!(cmd.starts_with("& '") && cmd.ends_with("' | Out-Null"), "{cmd}");
+        } else {
+            assert!(cmd.starts_with('\''), "{cmd}");
+        }
+        assert!(cmd.contains(" gemini_cli --data-dir '"));
+        assert!(v["hooks"].get("BeforeTool").is_none());
+        assert!(dir.path().join("data/spool").is_dir(), "the spool exists before the first hook runs");
         uninstall(AgentKind::GeminiCli, &env).unwrap();
+        assert!(!p.exists(), "a config file we created goes away again");
+    }
+
+    #[test]
+    fn cursor_never_hooks_permission_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path());
+        install(AgentKind::Cursor, &env).unwrap();
+        let p = dir.path().join(".cursor/hooks.json");
         let v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
-        assert_eq!(v, json!({}));
+        for e in ["subagentStart", "preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile"] {
+            assert!(v["hooks"].get(e).is_none(), "{e}");
+        }
+        uninstall(AgentKind::Cursor, &env).unwrap();
+        assert!(!p.exists(), "only {{\"version\": 1}} was left, and we created the file");
+    }
+
+    #[test]
+    fn hook_paths_with_quotes_stay_one_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env(dir.path());
+        env.data_dir = dir.path().join("o'brien data");
+        env.spool_dir = env.data_dir.join("spool");
+        install(AgentKind::GeminiCli, &env).unwrap();
+        let v: Value = serde_json::from_slice(&fs::read(dir.path().join(".gemini/settings.json")).unwrap()).unwrap();
+        let cmd = v["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap();
+        let escaped = if cfg!(windows) { "o''brien data" } else { "o'\\''brien data" };
+        assert!(cmd.contains(escaped), "{cmd}");
     }
 
     #[test]

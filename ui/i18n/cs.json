@@ -121,9 +121,9 @@
 
   "adapterHint.claude_code": "Funguje i bez úprav (čte přepisy relací). Hooky přidají přesný seznam úloh na pozadí a chyby API.",
   "adapterHint.codex": "Nic se neinstaluje – stav se čte z rollout souborů (CLI, IDE i desktop).",
-  "adapterHint.gemini_cli": "Vyžaduje hooky (Gemini CLI 0.26+). Experimentální, neověřeno na reálné instalaci.",
-  "adapterHint.cursor": "Vyžaduje hooky (Cursor 1.7+). CLI v režimu -p neposílá stop. Experimentální.",
-  "adapterHint.opencode": "Plugin pro OpenCode 1.x. Verze 2.x zatím není podporována. Experimentální.",
+  "adapterHint.gemini_cli": "Vyžaduje hooky (ověřeno s Gemini CLI 0.66). Hooky běží jen v důvěryhodných složkách – jinak běžící Gemini akci blokuje. Experimentální.",
+  "adapterHint.cursor": "Vyžaduje hooky (editor Cursor). Běžící CLI cursor-agent akci blokuje, dokud neskončí. Experimentální, neověřeno na reálné instalaci.",
+  "adapterHint.opencode": "Plugin pro OpenCode 1.x (ověřeno s 1.19). Experimentální.",
 
   "tray.show": "Zobrazit okno",
   "tray.monitor": "Hlídání",

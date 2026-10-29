@@ -19,7 +19,11 @@ use crate::str_field;
 
 const AGENT: AgentKind = AgentKind::GeminiCli;
 
+/// `$GEMINI_CLI_HOME/.gemini` or `~/.gemini`, as Gemini CLI resolves it.
 pub fn default_root() -> Option<std::path::PathBuf> {
+    if let Some(h) = std::env::var_os("GEMINI_CLI_HOME").filter(|v| !v.is_empty()) {
+        return Some(std::path::PathBuf::from(h).join(".gemini"));
+    }
     dirs::home_dir().map(|h| h.join(".gemini"))
 }
 

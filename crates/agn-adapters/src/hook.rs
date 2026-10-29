@@ -40,7 +40,14 @@ pub fn run(agent_arg: Option<&str>, stdin: &mut dyn Read, data_dir: &Path, ances
             agent = Some(AgentKind::Cursor);
         }
     }
-    let stdout = (agent == Some(AgentKind::Cursor)).then_some("{}");
+    // Cursor expects a JSON answer; `continue` is not documented as optional
+    // for beforeSubmitPrompt, so say it explicitly.
+    let stdout = (agent == Some(AgentKind::Cursor)).then(|| {
+        match payload.as_ref().and_then(|p| p.get("hook_event_name")).and_then(Value::as_str) {
+            Some("beforeSubmitPrompt") => r#"{"continue":true}"#,
+            _ => "{}",
+        }
+    });
 
     let (Some(agent), Some(payload)) = (agent, payload) else {
         log_error(data_dir, &format!("unusable hook input (agent={agent_arg:?}, {} bytes)", raw.len()));

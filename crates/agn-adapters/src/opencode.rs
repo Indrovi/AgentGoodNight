@@ -1,10 +1,12 @@
 //! OpenCode adapter (experimental) — a small plugin for the OpenCode 1.x
-//! plugin API forwards bus events into the AgentGoodNight spool.
+//! plugin API (`Hooks.event`) forwards bus events into the AgentGoodNight
+//! spool. Verified with OpenCode 1.19.5 on Windows.
 //!
-//! OpenCode 2.x uses an incompatible plugin API and is not supported yet;
-//! a running OpenCode process without a working plugin blocks the action.
-//! Child sessions (task tool, possibly `background: true`) are tracked as
-//! separate sessions, so a busy child blocks even while its parent is idle.
+//! The newer plugin API (`@opencode-ai/plugin/v2`, the root export of the
+//! prerelease line) is not used yet; a running OpenCode process without a
+//! working plugin blocks the action. Child sessions (task tool, possibly
+//! `background: true`) are tracked as separate sessions, so a busy child
+//! blocks even while its parent is idle.
 
 use agn_core::event::{AgentEvent, EventKind, FailureKind};
 use agn_core::model::{AgentKind, EvidenceSource};
@@ -65,7 +67,14 @@ export const AgentGoodNight = async ({ directory }) => {
       sessionID: p.sessionID || info.id || null,
       parentID: info.parentID || null,
       directory: info.directory || directory || null,
-      status: p.status ? { type: p.status.type, attempt: p.status.attempt, message: p.status.message, next: p.status.next } : null,
+      // Messages may contain URLs with account ids: strip them, keep it short.
+      status: p.status ? {
+        type: p.status.type,
+        attempt: p.status.attempt,
+        message: String(p.status.message || "").replace(/https?:\/\/\S+/g, "").slice(0, 200),
+        next: p.status.next,
+        reason: (p.status.action && p.status.action.reason) || null,
+      } : null,
       error: p.error ? { name: p.error.name } : null,
     });
   },
@@ -87,9 +96,16 @@ pub fn hook_events(rec: &SpoolRecord) -> Vec<AgentEvent> {
             "busy" => EventKind::TurnStarted,
             "idle" => EventKind::TurnCompleted { continuing: false, pending: None },
             "retry" => {
+                // OpenCode 1.19 tags quota retries (`free_tier_limit`,
+                // `account_rate_limit`); older versions only have the text.
                 let msg = str_field(&status, "message").unwrap_or("").to_lowercase();
-                let limited =
-                    msg.contains("rate") || msg.contains("429") || msg.contains("limit") || msg.contains("quota");
+                let tagged = str_field(&status, "reason").is_some_and(|r| r.contains("limit"));
+                let far = status.get("next").and_then(Value::as_i64).is_some_and(|n| n - rec.received_at > 5 * 60_000);
+                let limited = tagged
+                    || far
+                    || ["rate", "429", "limit", "quota", "too many requests", "usage", "exceeded"]
+                        .iter()
+                        .any(|w| msg.contains(w));
                 EventKind::TurnFailed {
                     kind: if limited { FailureKind::RateLimited } else { FailureKind::Reconnecting },
                     reason: Some("retry".into()),
@@ -145,11 +161,25 @@ mod tests {
             k(json!({"event":"session.status","sessionID":"o","status":{"type":"idle"}})),
             EventKind::TurnCompleted { .. }
         ));
+        let next = agn_core::time::now_millis() + 3_600_000;
         assert!(matches!(
             k(
-                json!({"event":"session.status","sessionID":"o","status":{"type":"retry","message":"429 rate limited","next":5}})
+                json!({"event":"session.status","sessionID":"o","status":{"type":"retry","message":"429 rate limited","next":next}})
             ),
-            EventKind::TurnFailed { kind: FailureKind::RateLimited, resets_at: Some(5), .. }
+            EventKind::TurnFailed { kind: FailureKind::RateLimited, resets_at: Some(n), .. } if n == next
+        ));
+        // Real 1.19.5 free-tier quota retry.
+        assert!(matches!(
+            k(
+                json!({"event":"session.status","sessionID":"o","status":{"type":"retry","message":"Free usage exceeded, subscribe to Go","reason":"free_tier_limit","next":next}})
+            ),
+            EventKind::TurnFailed { kind: FailureKind::RateLimited, .. }
+        ));
+        assert!(matches!(
+            k(
+                json!({"event":"session.status","sessionID":"o","status":{"type":"retry","message":"fetch failed","next":agn_core::time::now_millis() + 2_000}})
+            ),
+            EventKind::TurnFailed { kind: FailureKind::Reconnecting, .. }
         ));
         assert!(matches!(
             k(json!({"event":"session.error","sessionID":"o","error":{"name":"MessageAbortedError"}})),

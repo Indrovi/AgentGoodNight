@@ -792,7 +792,10 @@ impl Monitor {
                 // Launchers and helper children of a proven process of the
                 // same tool share its integration.
                 let family = procs.iter().any(|q| is_proven(q) && (Some(q.pid) == p.parent || q.parent == Some(p.pid)));
-                if predates_install || !(is_proven(p) || family) {
+                // The Cursor CLI reports no turn start in `-p` mode (and its
+                // events are unverified otherwise): it blocks while it runs.
+                let unobservable = agent == AgentKind::Cursor && p.role == ProcessRole::Session;
+                if predates_install || unobservable || !(is_proven(p) || family) {
                     self.untracked.push(untracked(p, &self.ignored_procs));
                 }
             }

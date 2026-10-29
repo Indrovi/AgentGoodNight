@@ -121,9 +121,9 @@
 
   "adapterHint.claude_code": "Works without changes (reads session transcripts). Hooks add the exact list of background tasks and API errors.",
   "adapterHint.codex": "Nothing to install – state is read from rollout files (CLI, IDE and desktop).",
-  "adapterHint.gemini_cli": "Requires hooks (Gemini CLI 0.26+). Experimental, not verified on a real installation.",
-  "adapterHint.cursor": "Requires hooks (Cursor 1.7+). The CLI in -p mode does not send stop. Experimental.",
-  "adapterHint.opencode": "Plugin for OpenCode 1.x. Version 2.x is not supported yet. Experimental.",
+  "adapterHint.gemini_cli": "Requires hooks (verified with Gemini CLI 0.66). Hooks only run in trusted folders – otherwise a running Gemini blocks the action. Experimental.",
+  "adapterHint.cursor": "Requires hooks (Cursor editor). A running cursor-agent CLI blocks the action until it exits. Experimental, not verified on a real installation.",
+  "adapterHint.opencode": "Plugin for OpenCode 1.x (verified with 1.19). Experimental.",
 
   "tray.show": "Show window",
   "tray.monitor": "Monitoring",

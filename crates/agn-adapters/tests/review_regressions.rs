@@ -1042,3 +1042,77 @@ fn r3_bash_mode_and_clear_do_not_start_turns() {
     w.run_until(0, 5);
     assert_eq!(w.state(AgentKind::ClaudeCode, "c1"), SessionState::Idle);
 }
+
+// ---------------------------------------------------------------------------
+// Fourth round: findings from runs against real installations (Gemini CLI
+// 0.66.0, OpenCode 1.19.5) and the Cursor hook docs, 2026-10-29.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r4_cursor_cli_blocks_while_it_runs_even_with_hook_records() {
+    let mut w = World::new();
+    integration::install(AgentKind::Cursor, w.monitor.integration_env()).unwrap();
+    // `cursor-agent -p`: sessionStart, then silent work (no beforeSubmitPrompt).
+    w.add_proc(AgentKind::Cursor, 8100, ProcessRole::Session, now_millis() + 10 * SECOND, None);
+    w.monitor.arm(w.at(0));
+    w.run_until(0, 19);
+    w.hook_from(
+        20,
+        8100,
+        "cursor",
+        json!({"conversation_id":"cli1","generation_id":"g","hook_event_name":"sessionStart"}),
+    );
+    w.codex_done(20);
+    assert!(w.run_until(20, 120).is_empty(), "a running Cursor CLI must block");
+    assert_eq!(
+        w.reasons().iter().filter(|r| !matches!(r, BlockReason::UntrackedProcess { pid: 8100, .. })).count(),
+        0,
+        "the Cursor CLI process is the only blocker: {:?}",
+        w.reasons()
+    );
+    // The run ends: the process exits and sessionEnd reports completion.
+    w.procs.retain(|p| p.pid != 8100);
+    w.monitor.set_fixed_processes(Ok(w.procs.clone()));
+    w.monitor.invalidate();
+    w.hook_from(
+        121,
+        8100,
+        "cursor",
+        json!({"conversation_id":"cli1","generation_id":"g","hook_event_name":"sessionEnd","reason":"completed"}),
+    );
+    assert_eq!(w.run_until(121, 250).len(), 1);
+}
+
+#[test]
+fn r4_cursor_response_after_stop_does_not_revive_the_turn() {
+    let mut w = World::new();
+    integration::install(AgentKind::Cursor, w.monitor.integration_env()).unwrap();
+    w.monitor.arm(w.at(0));
+    let p = |name: &str| json!({"conversation_id":"c","generation_id":"g","cursor_version":"2.0","hook_event_name":name,"status":"completed"});
+    w.hook_at(1, "cursor", p("beforeSubmitPrompt"));
+    w.hook_at(5, "cursor", p("stop"));
+    w.hook_at(6, "cursor", p("afterAgentResponse"));
+    assert_eq!(w.run_until(0, 80).len(), 1);
+    assert_eq!(w.state(AgentKind::Cursor, "c"), SessionState::Completed);
+}
+
+#[test]
+fn r4_cursor_hook_answers_prompt_submission_explicitly() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(data.join("spool")).unwrap();
+    let run = |name: &str| {
+        let input = json!({"conversation_id":"c","generation_id":"g","hook_event_name":name}).to_string();
+        hook::run(Some("cursor"), &mut input.as_bytes(), &data, vec![]).stdout
+    };
+    assert_eq!(run("beforeSubmitPrompt"), Some(r#"{"continue":true}"#));
+    assert_eq!(run("stop"), Some("{}"));
+}
+
+#[test]
+fn r4_opencode_plugin_strips_urls_from_messages() {
+    let src = agn_adapters::opencode::PLUGIN_SOURCE;
+    assert!(src.contains(r#".replace(/https?:\/\/\S+/g, "")"#));
+    assert!(src.contains(".slice(0, 200)"));
+    assert!(!src.contains("message: p.status.message,"));
+}
