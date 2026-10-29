@@ -14,6 +14,8 @@ pub enum AgentKind {
     ClaudeCode,
     Codex,
     GeminiCli,
+    // Serialized like `id()`; early builds wrote `open_code`.
+    #[serde(rename = "opencode", alias = "open_code")]
     OpenCode,
     Cursor,
 }
@@ -278,6 +280,17 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serialized_agent_names_are_the_ids() {
+        // The UI sends serialized names back as ids; they must round-trip.
+        for k in AgentKind::ALL {
+            assert_eq!(serde_json::to_value(k).unwrap(), serde_json::json!(k.id()));
+            assert_eq!(AgentKind::from_id(k.id()), Some(k));
+        }
+        let old: std::collections::BTreeMap<AgentKind, bool> = serde_json::from_str(r#"{"open_code": false}"#).unwrap();
+        assert_eq!(old.get(&AgentKind::OpenCode), Some(&false));
+    }
 
     #[test]
     fn blocking_states() {

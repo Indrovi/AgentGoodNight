@@ -116,6 +116,8 @@ function renderStatus(s) {
     return;
   }
   if (s.phase.phase === 'countdown' || s.phase.phase === 'verifying') {
+    // Cancel must be in view whenever a countdown runs.
+    showMain();
     box.classList.add('countdown');
     dot.classList.add('warn');
     const rem = s.remaining_ms ?? 0;
@@ -243,7 +245,8 @@ function renderAdapters(s) {
     const main = el('div', 'item-main');
     main.append(el('div', 'item-title', a.name));
     const code = a.enabled ? a.code : 'disabled';
-    const line = el('div', `status-line ${a.observable ? 'ok' : 'bad'}`, t(`adapter.${code}`));
+    const tone = a.enabled ? (a.observable ? ' ok' : ' bad') : '';
+    const line = el('div', `status-line${tone}`, t(`adapter.${code}`));
     main.append(line);
     const hint = el('div', 'item-sub', t(`adapterHint.${a.agent}`));
     main.append(hint);
@@ -320,6 +323,11 @@ async function poll() {
   }
 }
 
+function showMain() {
+  $('settings-view').hidden = true;
+  $('main-view').hidden = false;
+}
+
 function wire() {
   $('logo').innerHTML = ICONS.logo;
   document.querySelector('.gear').innerHTML = ICONS.gear;
@@ -335,10 +343,7 @@ function wire() {
     $('settings-msg').textContent = '';
     if (snap) renderAdapters(snap);
   });
-  $('close-settings').addEventListener('click', () => {
-    $('settings-view').hidden = true;
-    $('main-view').hidden = false;
-  });
+  $('close-settings').addEventListener('click', showMain);
   $('lang').addEventListener('change', async (e) => {
     await loadStrings(e.target.value);
     await act('set_language', { lang: e.target.value });

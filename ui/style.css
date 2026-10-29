@@ -142,6 +142,7 @@ button { font: inherit; color: inherit; }
 
 .list { list-style: none; margin: 0; padding: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
 #session-list { flex: 1; min-height: 0; }
+#session-list:empty { flex: 0; }
 .list::-webkit-scrollbar { width: 6px; }
 .list::-webkit-scrollbar-thumb { background: #2b3040; border-radius: 3px; }
 
@@ -196,7 +197,7 @@ button { font: inherit; color: inherit; }
 .adapters { flex: 1; min-height: 0; }
 .adapter { display: grid; grid-template-columns: 22px 1fr auto; gap: 9px; align-items: start; padding: 9px; border-radius: 8px; background: var(--panel); }
 .adapter .item-sub { white-space: normal; }
-.adapter .status-line { font-size: 12px; margin-top: 2px; }
+.adapter .status-line { font-size: 12px; margin-top: 2px; color: var(--muted); }
 .adapter .status-line.bad { color: #ffb0b0; }
 .adapter .status-line.ok { color: #9fe3bd; }
 .adapter-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
