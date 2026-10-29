@@ -103,7 +103,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cargo build -p agentgoodnight
+          cargo build -p agentgoodnight -p agn-hook
           node scripts/ui-e2e.mjs target/debug/agentgoodnight.exe
 
       - uses: actions/upload-artifact@v7

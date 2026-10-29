@@ -7,7 +7,7 @@
 // activity cancelling the countdown, the simulated action, integrations,
 // closing to the tray and reopening on a countdown.
 //
-//   cargo build -p agentgoodnight && node scripts/ui-e2e.mjs [path-to-exe]
+//   cargo build -p agentgoodnight -p agn-hook && node scripts/ui-e2e.mjs [path-to-exe]
 
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -16,6 +16,12 @@ import path from 'node:path';
 
 const PORT = 9333 + Math.floor(Math.random() * 500);
 const exe = path.resolve(process.argv[2] || 'target/debug/agentgoodnight.exe');
+// Connect copies the hook binary that sits next to the app.
+const hookBin = path.join(path.dirname(exe), 'agentgoodnight-hook.exe');
+if (!fs.existsSync(exe) || !fs.existsSync(hookBin)) {
+  console.error(`missing ${exe} or ${hookBin} — run: cargo build -p agentgoodnight -p agn-hook`);
+  process.exit(2);
+}
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agn-ui-e2e-'));
 const home = path.join(root, 'home');
 const data = path.join(root, 'data');

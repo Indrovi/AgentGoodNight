@@ -52,9 +52,10 @@ Not verified yet: a real sleep or shutdown on any OS, macOS and Linux on real ha
 ## Tools for sandboxed testing
 
 - `AGN_DATA_DIR=<dir>` — the app's own data directory (every build).
-- `AGN_TEST_HOME=<dir>` and `AGN_TEST_NO_PROCESSES=1` — **debug builds only** (compiled out of
-  release builds): every agent directory is read from the sandbox and the process scan is replaced
-  by an empty list, so simulated agent logs can drive the UI.
+- `AGN_TEST_HOME=<dir>`, `AGN_TEST_NO_PROCESSES=1` and `AGN_TEST_DEVTOOLS_PORT=<port>` — **debug
+  builds only** (compiled out of release builds): every agent directory is read from the sandbox,
+  the process scan is replaced by an empty list and the WebView2 window opens the DevTools protocol
+  with a profile of its own, so simulated agent logs can drive the real UI.
 - `cargo run -p agn-adapters --example sandbox -- install|uninstall|watch <agent> <home> <data>` —
   installs an integration exactly like the Connect button, but into a sandbox home that a real
   tool installation is pointed at (`USERPROFILE`/`HOME`/`XDG_*`/`CLAUDE_CONFIG_DIR`), then shows
