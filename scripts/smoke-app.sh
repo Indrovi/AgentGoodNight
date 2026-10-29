@@ -33,7 +33,15 @@ stop() {
   esac
 }
 
-sleep 30
+start=$SECONDS
+for _ in $(seq 1 60); do
+  grep -q "main window opened" "$log" 2>/dev/null && break
+  kill -0 "$pid" 2>/dev/null || break
+  sleep 2
+done
+echo "main window after $((SECONDS - start)) s"
+# Keep running for a while with the window open.
+sleep 15
 status=0
 if ! kill -0 "$pid" 2>/dev/null; then
   echo "::error::the app exited during start-up"

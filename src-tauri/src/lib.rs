@@ -42,6 +42,7 @@ pub fn run() {
             commands::uninstall_integration,
         ])
         .setup(move |app| {
+            tracing::info!("setting up window and tray");
             tray::build_main(app.handle())?;
             tray::create(app.handle())?;
             engine::spawn_loop(app.handle().clone(), engine.clone());
