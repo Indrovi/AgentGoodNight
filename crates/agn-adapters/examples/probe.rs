@@ -2,7 +2,7 @@
 //! and prints what it sees. Uses a throw-away data directory, never arms
 //! monitoring and never touches agent configuration.
 //!
-//! cargo run -p agn-adapters --example probe
+//! cargo run -p agn-adapters --example probe [relevance-hours]
 
 use agn_adapters::integration::IntegrationEnv;
 use agn_adapters::monitor::{Monitor, MonitorPaths, ProcessSource};
@@ -14,14 +14,15 @@ use agn_core::time::now_millis;
 
 fn main() {
     let data = std::env::temp_dir().join(format!("agn-probe-{}", std::process::id()));
+    let hours = std::env::args().nth(1).and_then(|h| h.parse().ok()).unwrap_or(24);
+    let settings = Settings { relevance_hours: hours, ..Settings::default() };
     let paths = MonitorPaths {
         data_dir: data.clone(),
         claude_root: claude::default_root(),
         codex_root: codex::default_root(),
         integration: IntegrationEnv::system(data.clone(), data.join("spool"), None),
     };
-    let mut m =
-        Monitor::new(Settings::default(), paths, ProcessSource::System(ProcessScanner::new()), PowerBackend::DryRun);
+    let mut m = Monitor::new(settings, paths, ProcessSource::System(ProcessScanner::new()), PowerBackend::DryRun);
     let t0 = std::time::Instant::now();
     m.cycle(now_millis());
     let first = t0.elapsed();

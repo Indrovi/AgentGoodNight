@@ -20,7 +20,7 @@ use agn_core::model::{AgentKind, EvidenceSource};
 use agn_core::time::{Millis, parse_rfc3339_millis};
 use serde_json::Value;
 
-use crate::tail::{FileTail, decode_zstd, mtime_millis};
+use crate::tail::{FileTail, for_each_zstd_line, mtime_millis};
 use crate::{SourceStatus, str_field};
 
 const AGENT: AgentKind = AgentKind::Codex;
@@ -152,7 +152,14 @@ pub fn session_id_from_name(path: &Path) -> String {
 fn read_first_line(path: &Path) -> Option<String> {
     let mut buf = Vec::new();
     if path.extension().is_some_and(|e| e == "zst") {
-        buf = decode_zstd(&fs::read(path).ok()?).ok()?;
+        let reader = std::io::BufReader::new(fs::File::open(path).ok()?);
+        let mut first = None;
+        for_each_zstd_line(reader, |l| {
+            first = Some(String::from_utf8_lossy(l).into_owned());
+            false
+        })
+        .ok()?;
+        return first;
     } else {
         fs::File::open(path).ok()?.take(4 * 1024 * 1024).read_to_end(&mut buf).ok()?;
     }

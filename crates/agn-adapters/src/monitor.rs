@@ -32,6 +32,9 @@ pub const FULL_INTERVAL: Millis = 15 * SECOND;
 /// Sessions shown in the UI even when settled, if active this recently.
 const SHOW_RECENT: Millis = 12 * HOUR;
 const MAX_SHOWN: usize = 60;
+/// A pause between two cycles longer than this means the system slept or
+/// the process was suspended.
+pub const RESUME_GAP: Millis = 2 * MINUTE;
 
 pub enum ProcessSource {
     System(ProcessScanner),
@@ -72,6 +75,7 @@ pub struct Monitor {
     untracked: Vec<UntrackedProcess>,
     verdict: Verdict,
     last_full: Option<Millis>,
+    last_cycle: Option<Millis>,
     backend: PowerBackend,
     last_power: Option<PowerRecord>,
     last_error: Option<String>,
@@ -154,6 +158,7 @@ impl Monitor {
             untracked: Vec::new(),
             verdict: Verdict::Disarmed,
             last_full: None,
+            last_cycle: None,
             backend,
             last_power: None,
             last_error: None,
@@ -259,6 +264,16 @@ impl Monitor {
     /// One monitoring step. Returns an action only after the countdown
     /// expired *and* a fresh full rescan still allows it.
     pub fn cycle(&mut self, now: Millis) -> Option<PowerAction> {
+        if let Some(prev) = self.last_cycle.replace(now) {
+            if now - prev > RESUME_GAP || now < prev {
+                // Woke up from sleep (or the clock jumped): never act on a
+                // countdown that "expired" while the machine was off.
+                if self.controller.rearm_after_gap(now) {
+                    tracing::warn!(gap_ms = now - prev, "time gap detected, countdown reset");
+                }
+                self.last_full = None;
+            }
+        }
         let full = self.last_full.is_none_or(|t| now - t >= FULL_INTERVAL || now < t);
         self.collect(now, full);
         if self.controller.on_verdict(&self.verdict, now) == Some(Command::Verify) {

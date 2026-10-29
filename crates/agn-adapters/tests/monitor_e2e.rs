@@ -294,3 +294,18 @@ fn process_scan_failure_blocks() {
     assert!(w.run_until(0, 200).is_empty());
     assert!(w.reasons().iter().any(|r| matches!(r, BlockReason::AdapterUnobservable { .. })));
 }
+
+#[test]
+fn wake_from_sleep_during_countdown_never_acts_immediately() {
+    let mut w = World::new();
+    w.monitor.arm(w.at(0));
+    w.codex(1, "session_meta", json!({"id": CODEX_ID, "cwd": "/w"}));
+    w.codex(2, "event_msg", json!({"type":"task_started"}));
+    w.codex(3, "event_msg", json!({"type":"task_complete"}));
+    assert!(w.run_until(0, 20).is_empty());
+    assert!(matches!(w.monitor.controller().phase(), agn_core::countdown::Phase::Countdown { .. }));
+    // The machine slept for three hours (e.g. the user put it to sleep).
+    assert!(w.run_until(3 * 3600, 3 * 3600 + 120).is_empty(), "old completion must not count after resume");
+    assert!(w.monitor.controller().is_armed());
+    assert!(w.reasons().contains(&BlockReason::NoCompletionRecorded));
+}

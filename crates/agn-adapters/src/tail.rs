@@ -7,7 +7,7 @@
 //! changed and only below a size cap.
 
 use std::fs::{self, File};
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -16,7 +16,7 @@ use agn_core::Millis;
 /// Upper bound read from a plain file per poll; the rest follows next poll.
 const MAX_CHUNK: u64 = 8 * 1024 * 1024;
 /// Compressed files larger than this are not decoded.
-const MAX_ZST: u64 = 64 * 1024 * 1024;
+const MAX_ZST: u64 = 1024 * 1024 * 1024;
 
 pub fn mtime_millis(meta: &fs::Metadata) -> Millis {
     meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as Millis).unwrap_or(0)
@@ -120,6 +120,8 @@ impl FileTail {
         Ok(TailRead { lines, mtime, from_middle, grew })
     }
 
+    /// Streams the decoded content, keeping only what will be emitted, so
+    /// even very large compressed rollouts use bounded memory.
     fn read_compressed(&mut self, len: u64, mtime: Millis, initial_window: u64, grew: bool) -> io::Result<TailRead> {
         self.len_seen = len;
         let first = !self.started;
@@ -127,32 +129,79 @@ impl FileTail {
         if len > MAX_ZST {
             return Err(io::Error::other("compressed rollout too large"));
         }
-        let raw = fs::read(&self.path)?;
-        let text = decode_zstd(&raw)?;
-        let all: Vec<&[u8]> = text.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect();
-        let mut from_middle = false;
-        let skip = if first {
-            // Emulate the initial window on decoded content.
-            let mut acc = 0u64;
-            let mut idx = all.len();
-            while idx > 0 && acc + (all[idx - 1].len() as u64) < initial_window {
-                acc += all[idx - 1].len() as u64 + 1;
-                idx -= 1;
+        let reader = std::io::BufReader::new(File::open(&self.path)?);
+        let mut window: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
+        let mut window_bytes = 0u64;
+        let mut total = 0usize;
+        let mut dropped = false;
+        let mut fresh = Vec::new();
+        for_each_zstd_line(reader, |line| {
+            total += 1;
+            if first {
+                window_bytes += line.len() as u64 + 1;
+                window.push_back(line.to_vec());
+                while window_bytes > initial_window {
+                    if let Some(old) = window.pop_front() {
+                        window_bytes -= old.len() as u64 + 1;
+                        dropped = true;
+                    } else {
+                        break;
+                    }
+                }
+            } else if total > self.lines_emitted {
+                fresh.push(line.to_vec());
             }
-            from_middle = idx > 0;
-            idx
-        } else if all.len() < self.lines_emitted {
-            0
-        } else {
-            self.lines_emitted
-        };
+            true
+        })?;
+        if !first && total < self.lines_emitted {
+            // Replaced by a shorter file: start over on the next read.
+            self.started = false;
+            self.lines_emitted = 0;
+            return Ok(TailRead { mtime, grew, ..Default::default() });
+        }
+        self.lines_emitted = total;
         let mut lines = Vec::new();
-        for l in &all[skip..] {
+        for l in window.iter().chain(fresh.iter()) {
             push_line(&mut lines, l);
         }
-        self.lines_emitted = all.len();
-        Ok(TailRead { lines, mtime, from_middle, grew })
+        Ok(TailRead { lines, mtime, from_middle: first && dropped, grew })
     }
+}
+
+/// Decodes concatenated zstd frames and calls `f` for every complete line.
+pub fn for_each_zstd_line(mut reader: impl io::BufRead, mut f: impl FnMut(&[u8]) -> bool) -> io::Result<()> {
+    let mut carry: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        if reader.fill_buf()?.is_empty() {
+            break;
+        }
+        let mut dec = ruzstd::decoding::StreamingDecoder::new(&mut reader)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        loop {
+            let n = dec.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            carry.extend_from_slice(&buf[..n]);
+            let mut start = 0;
+            while let Some(pos) = carry[start..].iter().position(|b| *b == b'\n') {
+                let line = &carry[start..start + pos];
+                if !line.is_empty() && !f(line) {
+                    return Ok(());
+                }
+                start += pos + 1;
+            }
+            carry.drain(..start);
+            if carry.len() > 64 * 1024 * 1024 {
+                carry.clear();
+            }
+        }
+    }
+    if !carry.is_empty() {
+        f(&carry);
+    }
+    Ok(())
 }
 
 fn push_line(out: &mut Vec<String>, raw: &[u8]) {
@@ -161,21 +210,6 @@ fn push_line(out: &mut Vec<String>, raw: &[u8]) {
         return;
     }
     out.push(String::from_utf8_lossy(raw).into_owned());
-}
-
-/// Decodes one or more concatenated zstd frames.
-pub fn decode_zstd(raw: &[u8]) -> io::Result<Vec<u8>> {
-    let mut cursor = Cursor::new(raw);
-    let mut out = Vec::new();
-    while (cursor.position() as usize) < raw.len() {
-        let mut dec = ruzstd::decoding::StreamingDecoder::new(&mut cursor)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        dec.read_to_end(&mut out)?;
-        if out.len() > 512 * 1024 * 1024 {
-            return Err(io::Error::other("decoded rollout too large"));
-        }
-    }
-    Ok(out)
 }
 
 /// Lists files under `dir` (non-recursive) matching `pred`, with metadata.
@@ -272,6 +306,40 @@ mod tests {
         fs::write(&p, b"{\"b\":1}\n").unwrap();
         let r = t.read_new(1 << 20).unwrap();
         assert_eq!(r.lines, vec!["{\"b\":1}"]);
+    }
+
+    #[test]
+    fn compressed_rollouts_stream_with_window_and_increments() {
+        use ruzstd::encoding::{CompressionLevel, compress_to_vec};
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("r.jsonl.zst");
+        let body: String = (0..500)
+            .map(|i| {
+                format!(
+                    "{{\"i\":{i}}}
+"
+                )
+            })
+            .collect();
+        // Two concatenated frames, like an appended compressed stream.
+        let (a, b) = body.split_at(body.len() / 2);
+        let mut raw = compress_to_vec(a.as_bytes(), CompressionLevel::Fastest);
+        raw.extend(compress_to_vec(b.as_bytes(), CompressionLevel::Fastest));
+        fs::write(&p, &raw).unwrap();
+        let mut t = FileTail::new(p.clone());
+        let r = t.read_new(100).unwrap();
+        assert!(r.from_middle);
+        assert_eq!(r.lines.last().unwrap(), "{\"i\":499}");
+        assert!(r.lines.len() < 20);
+        raw.extend(compress_to_vec(
+            "{\"i\":500}
+"
+            .as_bytes(),
+            CompressionLevel::Fastest,
+        ));
+        fs::write(&p, &raw).unwrap();
+        let r = t.read_new(100).unwrap();
+        assert_eq!(r.lines, vec!["{\"i\":500}"]);
     }
 
     #[test]

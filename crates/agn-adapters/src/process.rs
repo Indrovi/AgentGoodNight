@@ -33,7 +33,7 @@ pub struct AgentProcess {
 
 #[derive(Default)]
 pub struct ProcessScanner {
-    sys: Option<System>,
+    sys: Option<Box<System>>,
 }
 
 impl ProcessScanner {
@@ -43,7 +43,7 @@ impl ProcessScanner {
 
     pub fn scan(&mut self) -> Result<Vec<AgentProcess>, String> {
         if self.sys.is_none() {
-            self.sys = Some(System::new().map_err(|e| e.to_string())?);
+            self.sys = Some(Box::new(System::new().map_err(|e| e.to_string())?));
         }
         let sys = self.sys.as_mut().ok_or("process scanner unavailable")?;
         let kind = ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet).with_cmd(UpdateKind::OnlyIfNotSet);

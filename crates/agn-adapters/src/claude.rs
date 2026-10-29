@@ -470,6 +470,17 @@ impl LineParser {
         if any && kinds.is_empty() {
             kinds.push(EventKind::Activity { detail: Some("assistant".into()) });
         }
+        // Without configured Stop hooks Claude Code writes no
+        // stop_hook_summary; the final end_turn message is then the only
+        // end-of-turn record. A blocking stop hook (preventedContinuation)
+        // or any later entry revives the session, so this is safe either way.
+        let message = v.get("message");
+        let stop_reason = message.and_then(|m| str_field(m, "stop_reason"));
+        let synthetic = message.and_then(|m| str_field(m, "model")) == Some("<synthetic>");
+        let used_tool = items.into_iter().flatten().any(|i| str_field(i, "type") == Some("tool_use"));
+        if stop_reason == Some("end_turn") && !synthetic && !used_tool {
+            kinds.push(EventKind::TurnCompleted { continuing: false, pending: None });
+        }
         kinds
     }
 }

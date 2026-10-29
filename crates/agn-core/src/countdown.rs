@@ -111,6 +111,18 @@ impl Controller {
         Some(StopCause::UserDisarmed)
     }
 
+    /// The host noticed a large gap in time (system sleep/resume, suspended
+    /// process). Whatever was decided before the gap is void: any countdown
+    /// is dropped and only completions recorded from now on count.
+    pub fn rearm_after_gap(&mut self, now: Millis) -> bool {
+        if self.phase == Phase::Off {
+            return false;
+        }
+        self.phase = Phase::Watching;
+        self.armed_at = Some(now);
+        true
+    }
+
     /// User pressed Cancel during the countdown. Monitoring stays armed, but
     /// only completions recorded from now on can trigger a new countdown.
     pub fn cancel(&mut self, now: Millis) -> bool {
