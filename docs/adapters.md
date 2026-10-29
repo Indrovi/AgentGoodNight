@@ -40,6 +40,13 @@ Docs: <https://code.claude.com/docs/en/hooks>. The desktop app runs its own copy
 | `~/.claude/sessions/<pid>.json` (`sessionId`, `startedAt`, `entrypoint`, `status`) | pid + process start ↔ session; `status` is only a veto (a busy process without a tracked session blocks) |
 | `hooks.Stop[].hooks[].timeout` in user, project (every tracked cwd and its parents), local, plugin `hooks/hooks.json` and managed settings | length of the inferred settle window (max + 1 min, at least 11 min) |
 
+Verified with the real CLI 2.1.309 in an isolated `CLAUDE_CONFIG_DIR` (no login): the installed
+exec-form hook runs on Windows and records `SessionStart` (`source: startup`), `UserPromptSubmit`,
+`StopFailure` (`error: authentication_failed`) and `SessionEnd` (`reason: other`); the monitor
+shows the run as *error*, then *ended*, and the Claude Desktop processes that use the default
+config directory as untracked. A successful turn with hooks needs a login and is covered by the
+real transcripts of logged-in sessions instead.
+
 Notes: the transcript is an internal format. No hook fires on a user interrupt. `SubagentStop` fires
 repeatedly on 2.1.309 and is ignored. Usage-limit auto-continue means a rate-limited session is
 paused, not finished. Installed hooks use exec form (`command` = hook path,
@@ -68,26 +75,71 @@ needed or installed. `notify` is often used by the desktop app itself and is nev
 
 ## Gemini CLI (experimental)
 
-Docs: <https://geminicli.com/docs/hooks/>. `BeforeAgent` → turn started, `AfterAgent` → end of
-turn, `BeforeTool`/`AfterTool`/`BeforeModel`/`AfterModel` → activity, `Notification`
-`ToolPermission` → waiting for input, `SessionStart`/`SessionEnd`. Payload `timestamp` is used for
-ordering. Not verified on a real installation; `AfterAgent` may fire after a stream error.
+Docs: <https://geminicli.com/docs/hooks/>. Installed events: `SessionStart` → idle,
+`BeforeAgent` → turn started, `AfterTool` → activity, `AfterAgent` → end of turn,
+`Notification` `ToolPermission` → waiting for input, `SessionEnd` → ended. Payload
+`timestamp` is used for ordering.
 
-## Cursor (experimental)
+Verified with Gemini CLI 0.66.0 on Windows 11 (PowerShell 5.1), installed in a sandbox home
+(`GEMINI_CLI_HOME`), including a full offline turn through the CLI's own fake-response mode:
+`SessionStart` → `BeforeAgent` → `AfterAgent` → `SessionEnd` records, the hook's process chain
+reaches the Gemini node processes, and the monitor shows *running*, *finishing*, *ended*.
+Findings that shaped the integration:
 
-Docs: <https://cursor.com/docs/agent/hooks>. `beforeSubmitPrompt` → turn started, tool/agent
-events → activity, `stop` `completed` / `aborted` / `error` → end / interrupted / error,
-`sessionEnd` `completed` → end of turn (the CLI in `-p` mode emits no `stop`). Hooks run through
-PowerShell on Windows and stdin starts with a BOM; the hook always prints `{}`. A `followup_message`
-from another hook can continue the conversation; the settle window absorbs it.
+- On Windows Gemini runs every hook command through PowerShell, so the command is
+  `& '<hook>' gemini_cli --data-dir '<data>' | Out-Null` (the pipe makes PowerShell wait for the
+  hook, which otherwise exits before the hook has recorded its parent processes). Elsewhere the
+  command is single-quoted for `bash -c`.
+- Gemini only runs user-level hooks in **trusted folders** (folder trust is on by default). In an
+  untrusted folder no hook runs, so a running Gemini stays an untracked process and blocks.
+- Hooks run synchronously (~0.3 s PowerShell start each), so `BeforeTool`, `BeforeModel` and
+  `AfterModel` are not installed.
+- `GEMINI_CLI_HOME` decides where Gemini reads its settings; AgentGoodNight installs there too.
+- Not verified live: `Notification`/`ToolPermission`, a turn whose tool call is cancelled (it
+  probably fires no `AfterAgent`, so the session keeps blocking), `AfterAgent` after a stream
+  error. Antigravity, which replaces Gemini CLI for some accounts, is not covered.
 
-## OpenCode (experimental, 1.x only)
+## Cursor (experimental, not verified on a real installation)
+
+Docs: <https://cursor.com/docs/agent/hooks>. Installed events: `workspaceOpen`, `sessionStart`
+→ idle, `beforeSubmitPrompt` → turn started, `postToolUse` → activity, `stop` `completed` /
+`aborted` / `error` → end / interrupted / error, `sessionEnd` `completed` → end of work, other
+reasons → ended. Late observers (`afterAgentResponse`, `afterAgentThought`, `subagentStop`)
+only count as heartbeats and never revive a finished turn.
+
+- No permission hook is installed (`subagentStart`, `preToolUse`, `before*Execution`, ...):
+  an empty answer there may deny the agent's action. The hook answers `{"continue":true}` to
+  `beforeSubmitPrompt` and `{}` to everything else.
+- On Windows Cursor runs hooks through PowerShell (`$input | <command>`) and stdin starts with a
+  BOM; the command is `& '<hook>' cursor --data-dir '<data>' | Write-Output`, so PowerShell waits
+  for the hook and passes its answer on. Checked by emulating that wrapper.
+- The **cursor-agent CLI** reports no turn start in `-p` mode and its other events are
+  unverified, so a running cursor-agent process always blocks; when it exits, `sessionEnd`
+  `completed` records the completion.
+- Subagent conversations have their own ids and no `stop`; they keep blocking until the relevance
+  window ends. A `followup_message` from another hook can continue the conversation; the settle
+  window absorbs it. On Windows, cursor-agent started from Git Bash cannot run any hook.
+
+## OpenCode (experimental, plugin API 1.x)
 
 Docs: <https://opencode.ai/docs/plugins/>. The plugin forwards `session.status` (`busy` → turn
-started, `idle` → end of turn, `retry` → reconnecting / rate limited), `session.error`
+started, `idle` → end of turn, `retry` → reconnecting, or rate limited when OpenCode tags it as a
+quota limit, the message says so or the next retry is more than 5 min away), `session.error`
 (`MessageAbortedError` → interrupted), `permission.asked` / `question.asked` → waiting for input.
 Child sessions (`parentID`) are tracked separately, so a background child blocks while its parent is
-idle. OpenCode 2.x uses an incompatible plugin API and is not supported yet.
+idle. Status messages are forwarded without URLs and cut to 200 characters.
+
+Verified with OpenCode 1.19.5 on Windows in a sandbox (TUI, `run`, `serve` with its HTTP API, a
+local mock model): the plugin loads in every process type, and the monitor derived idle, running,
+finishing, completed, rate limited, reconnecting, error, interrupted, waiting for input and ended;
+the opencode process is proven by the plugin's records. Limits:
+
+- `opencode serve` / `web` load plugins only at the first client request; until then such a
+  server is an untracked process and blocks. `--pure` disables plugins, so it always blocks.
+- If an opencode process dies mid-turn, its session stays *running* (blocking) until the relevance
+  window ends; it is not linked to the process.
+- OpenCode also ships a newer plugin API (`@opencode-ai/plugin/v2`, the root export of its
+  prerelease line); it has no event bus yet and is not used.
 
 ## Processes
 
@@ -98,6 +150,7 @@ reused after a reboot is a different process. Scans detect agents we cannot see 
   or silent. A hook record proves only the process found in the hook's own ancestor chain
   (pid, start time, tool), shared with its launcher or helper processes of the same tool; a
   Claude Code hook running in Cursor's terminal does not prove Cursor;
+- a running cursor-agent CLI process (its turns are not observable);
 - a Claude Code process missing from the registry, or registered as busy without a tracked session;
 - a Codex CLI/exec process without its own rollout (one rollout per process) active in its working
   directory (`cwd`, `-C`/`--cd`) since it started. Threads of the Codex desktop app or IDE host stay

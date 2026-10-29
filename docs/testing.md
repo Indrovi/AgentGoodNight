@@ -37,8 +37,15 @@ Windows 11 (AMD, S3 standby and hibernation available according to `powercfg /a`
   A full successful turn with hooks needs a login and was not run in isolation.
 - **GUI** — the end-to-end flow above, run against the real window; idle cost of the app process
   in a debug build: ~0.2 % of one core, ~7 MB private memory with the window closed to the tray.
-- **Gemini CLI, OpenCode, Cursor** — see [adapters.md](adapters.md) for what was verified on real
-  installations and what was not.
+- **Gemini CLI 0.66.0** (npm, sandboxed home, no account): config accepted, hooks run through
+  PowerShell with the call-operator form, full offline turn via the CLI's fake-response mode,
+  states and process proof checked. This run found that the earlier command form never ran on
+  Windows and that hooks need a trusted folder.
+- **OpenCode 1.19.5** (npm, sandboxed XDG dirs, local mock model): plugin loads in TUI, `run` and
+  `serve`; all mapped states observed; process proof checked.
+- **Cursor** — not installed; hooks checked against the current docs and by emulating Cursor's
+  documented PowerShell wrapper (answers, BOM, process chain).
+- Details and remaining gaps per tool: [adapters.md](adapters.md).
 
 Not verified yet: a real sleep or shutdown on any OS, macOS and Linux on real hardware.
 

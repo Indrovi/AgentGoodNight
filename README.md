@@ -7,7 +7,8 @@ agents' own lifecycle signals and only acts after every tracked run has recorded
 If anything is still running, waiting for you, rate-limited, scheduled to continue or simply
 unknown, the computer stays on.
 
-- Rust + Tauri 2, tiny dark window, tray icon, background monitoring
+- Rust + Tauri 2, tiny dark window, tray icon, background monitoring (closing the window releases
+  the webview; the monitor itself needs a few MB of RAM and almost no CPU)
 - Windows, macOS, Linux; fully local — no cloud, no telemetry, no AI APIs
 - UI in Czech and English (i18n-ready)
 - MIT licensed
@@ -64,9 +65,9 @@ tracked again as soon as it starts new work; the exclusion survives restarts.
 |------|----------|----------|-------|--------|
 | Claude Code | CLI, IDE, Claude Desktop "Code" tab | transcripts in `~/.claude/projects` (end of turn, `/goal`, background tasks, crons, interrupts, usage limits) + subagent/workflow writes + process registry; optional lifecycle hooks add the authoritative `background_tasks`/`session_crons` list and `StopFailure` | none (hooks optional, one click) | verified on Windows with Claude Code 2.1.309 |
 | Codex | CLI, IDE extension, Codex desktop app | rollout files in `~/.codex/sessions` (`task_started`, `task_complete`, `turn_aborted`, goals, rate limits) | none | parser verified against real rollouts; approval waits are not persisted and simply count as running |
-| Gemini CLI | CLI ≥ 0.26 | lifecycle hooks (`BeforeAgent`/`AfterAgent`, tools, `ToolPermission`) | hooks (one click) | experimental — not verified on a real installation |
-| Cursor | editor ≥ 1.7, `cursor-agent` | hooks (`stop` with status, `sessionEnd`) | hooks (one click) | experimental; the CLI in `-p` mode emits no `stop` |
-| OpenCode | 1.x | plugin forwarding `session.status` / errors / permissions | plugin (one click) | experimental; 2.x plugin API not supported yet |
+| Gemini CLI | CLI (verified with 0.66) | lifecycle hooks (`BeforeAgent`/`AfterAgent`, tools, `ToolPermission`) | hooks (one click); hooks only run in trusted folders | experimental; hooks and a full turn verified on Windows, permission prompts not yet |
+| Cursor | editor; `cursor-agent` only blocks | hooks (`stop` with status, `sessionEnd`) | hooks (one click) | experimental — checked against the docs, not on a real installation; a running `cursor-agent` always blocks |
+| OpenCode | 1.x (verified with 1.19) | plugin forwarding `session.status` / errors / permissions | plugin (one click) | experimental; verified on Windows with a local mock model |
 
 Without the integration a running Gemini, Cursor or OpenCode process blocks the action, unless you
 turn that tool's tracking off. The exact event-to-state mapping per tool is in
@@ -103,6 +104,10 @@ Without `--features real-power` the build contains only the simulated power mana
   a DryRun manager that only records what it would have done (the UI shows a *DRY RUN* badge).
 - `cargo run -p agn-adapters --example probe` prints what the monitor sees on your machine,
   read-only.
+- `node scripts/ui-e2e.mjs` (Windows) drives the real window of the debug build through the whole
+  overnight flow against a sandbox; `scripts/smoke-app.sh` checks that a built app starts. What is
+  verified where, and the checklist for a first real power test, are in
+  [docs/testing.md](docs/testing.md).
 
 ```
 crates/agn-core      session model, tracker, safety policy, countdown, power backends, spool
@@ -133,9 +138,17 @@ or `~/.local/share/AgentGoodNight` (`AGN_DATA_DIR` overrides it).
   Cursor background (cloud) agents and agents inside Docker containers are out of scope.
 - Cursor's editor counts as observed only after it produced a hook record (e.g. `workspaceOpen`)
   since it started; until then it blocks.
-- Gemini's `AfterAgent` may also fire after a stream error.
-- A build is not proof of correct behaviour on every OS; Linux and macOS power actions are
-  untested on real hardware so far.
+- Gemini's `AfterAgent` may also fire after a stream error. Gemini runs hooks only in trusted
+  folders; elsewhere a running Gemini blocks.
+- An idle `opencode serve` loads its plugin only with the first client request and blocks until
+  then; an OpenCode process that dies mid-turn leaves its session blocking until it is excluded or
+  the relevance window ends.
+- Tools that are not listed (e.g. Google Antigravity, Windsurf, Copilot agents) are not detected at
+  all — they neither block nor complete anything.
+- A build is not proof of correct behaviour on every OS. No real sleep or shutdown has been
+  performed yet on any OS (see [docs/testing.md](docs/testing.md)). On Windows PCs with Modern
+  Standby (no S3 state, see `powercfg /a`) the sleep request may hibernate or fail instead; on
+  macOS, shutting down asks for the Automation permission for System Events the first time.
 
 Future ideas: estimated energy savings, more tools.
 
