@@ -132,7 +132,12 @@ $p = Get-Process -Id ${app.pid} -ErrorAction SilentlyContinue
 const WD = 'http://127.0.0.1:4444';
 let wdSession = null;
 async function wd(method, url, body) {
-  const r = await fetch(`${WD}${url}`, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(`${WD}${url}`, {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(T(40000)),
+  });
   const j = await r.json();
   if (j.value && j.value.error) throw new Error(`${j.value.error}: ${j.value.message}`);
   return j.value;
@@ -214,6 +219,8 @@ const env = {
   // Debug builds on Windows only: DevTools port and a WebView2 profile of
   // its own.
   ...(WIN ? { AGN_TEST_DEVTOOLS_PORT: String(PORT) } : {}),
+  // Linux: Tauri lets WebKitWebDriver automate the window only with this.
+  ...(WIN ? {} : { TAURI_WEBVIEW_AUTOMATION: 'true' }),
 };
 // Linux: tauri-driver starts the app (with this environment) for the session.
 const app = WIN
