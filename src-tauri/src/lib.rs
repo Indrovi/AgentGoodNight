@@ -6,10 +6,15 @@ mod engine;
 mod tray;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{Manager, RunEvent, WindowEvent};
 
 pub use engine::Engine;
+
+/// Set when the user closes the main window, so the exit request that
+/// follows the last window closing is turned into "keep running in the tray".
+static CLOSING_TO_TRAY: AtomicBool = AtomicBool::new(false);
 
 pub fn run() {
     let _ = tracing_subscriber::fmt().with_writer(std::io::stderr).with_target(false).try_init();
@@ -42,22 +47,27 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the window keeps monitoring alive in the tray.
-            if let WindowEvent::CloseRequested { api, .. } = event {
+            if let WindowEvent::CloseRequested { .. } = event {
                 if window.label() == "main" {
-                    api.prevent_close();
-                    let _ = window.hide();
+                    CLOSING_TO_TRAY.store(true, Ordering::Release);
                 }
             }
         })
         .build(tauri::generate_context!())
         .expect("failed to build the Tauri application");
 
-    app.run(|handle, event| {
-        if let RunEvent::Exit = event {
+    app.run(|handle, event| match event {
+        // Closing the window destroys it (freeing the webview's memory) but
+        // keeps monitoring alive in the tray. Quit from the tray or the OS
+        // still ends the app.
+        RunEvent::ExitRequested { api, code: None, .. } if CLOSING_TO_TRAY.swap(false, Ordering::AcqRel) => {
+            api.prevent_exit()
+        }
+        RunEvent::Exit => {
             if let Some(engine) = handle.try_state::<Arc<Engine>>() {
                 engine.persist(true);
             }
         }
+        _ => {}
     });
 }

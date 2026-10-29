@@ -1,6 +1,7 @@
 //! System tray: quick toggle, action choice and status tooltip.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use agn_adapters::monitor::Snapshot;
 use agn_core::countdown::Phase;
@@ -8,7 +9,7 @@ use agn_core::power::PowerAction;
 use agn_core::time::now_millis;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Manager, WebviewWindowBuilder, Wry};
 
 use crate::engine::Engine;
 use agn_core::i18n::t;
@@ -29,7 +30,36 @@ pub fn show_main(app: &AppHandle) {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        return;
     }
+    // Closing the window destroys it, which frees the webview's memory while
+    // monitoring runs in the tray; build it again from the configuration.
+    // Built on its own thread: window creation on the main thread from an
+    // event handler can deadlock on Windows.
+    static OPENING: AtomicBool = AtomicBool::new(false);
+    if OPENING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if app.get_webview_window("main").is_none() {
+            let built = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .map(|cfg| WebviewWindowBuilder::from_config(&app, cfg).and_then(|b| b.build()));
+            match built {
+                Some(Ok(w)) => {
+                    let _ = w.set_focus();
+                }
+                Some(Err(e)) => tracing::warn!(error = %e, "could not open the main window"),
+                None => tracing::warn!("main window missing from the configuration"),
+            }
+        }
+        OPENING.store(false, Ordering::Release);
+    });
 }
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
