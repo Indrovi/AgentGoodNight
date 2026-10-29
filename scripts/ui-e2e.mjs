@@ -96,7 +96,23 @@ async function connect() {
     } catch { /* not up yet */ }
     await sleep(500);
   }
-  throw new Error('WebView DevTools endpoint did not come up');
+  throw new Error(`WebView DevTools endpoint did not come up\n${diagnose()}`);
+}
+
+// What runs, with which flags and ports, and which windows exist.
+function diagnose() {
+  const ps = `
+$w = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Select-Object ProcessId, ParentProcessId, @{n='Cmd';e={$_.CommandLine.Substring(0, [Math]::Min(300, $_.CommandLine.Length))}}
+"webview2 processes: $(@($w).Count)"; $w | ForEach-Object { "  $($_.ProcessId) <- $($_.ParentProcessId): $($_.Cmd)" }
+"listening on ${PORT}: " + (@(Get-NetTCPConnection -State Listen -LocalPort ${PORT} -ErrorAction SilentlyContinue).Count)
+$p = Get-Process -Id ${app.pid} -ErrorAction SilentlyContinue
+"app alive: $([bool]$p) window: '$($p.MainWindowTitle)' handle: $($p.MainWindowHandle) session: $($p.SessionId)"
+"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS in child env requested: --remote-debugging-port=${PORT}"`;
+  try {
+    return execFileSync('powershell', ['-NoProfile', '-Command', ps]).toString();
+  } catch (e) {
+    return `diagnostics failed: ${e}`;
+  }
 }
 
 let cdp;
