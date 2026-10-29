@@ -11,30 +11,40 @@ Docs: <https://code.claude.com/docs/en/hooks>. The desktop app runs its own copy
 
 | Evidence | Mapping |
 |----------|---------|
-| transcript `user` (human / `scheduled` / `task_notification`) | turn started |
+| transcript `user` (human / `task_notification`) | turn started |
+| transcript `user` with `turnOrigin: scheduled` | the earliest due wake-up fired + turn started |
+| transcript `user` local command output, bash mode (`<bash-input>`, `<bash-stdout>`), `isMeta` | activity only (no model turn) |
+| transcript `user` `/clear` | idle (new conversation) |
 | transcript `assistant` tool use, tool results, `queue-operation` enqueue, `queued_command` | activity |
-| `system/stop_hook_summary`, `preventedContinuation: false` | end of turn |
+| `system/stop_hook_summary`, `preventedContinuation: false` | confirmed end of turn (short settle) |
 | `system/stop_hook_summary`, `preventedContinuation: true` (stop hook such as `/goal` blocked) | activity |
-| final `assistant` message with `stop_reason: end_turn` (no Stop hooks configured → no summary) | inferred end of turn (11 min settle) |
+| final `assistant` message with `stop_reason: end_turn` (no Stop hooks configured → no summary) | inferred end of turn (long settle) |
 | `attachment/goal_status` `met: false` / `true`, `/goal clear` | goal active / cleared |
-| tool use with `run_in_background`, async `Agent`, `Monitor`, `Workflow` + id from `toolUseResult` / result text | background task |
+| tool use with `run_in_background`, async `Agent`, `Monitor`, `Workflow` + id from `toolUseResult` / result text | background task (without a readable id: stays pending until a Stop hook snapshot) |
 | `<task-notification>` with terminal `<status>` (user entry, queued command or queue operation) | background task finished |
-| `ScheduleWakeup` / `CronCreate` / `CronDelete` tool use | wake-up / recurring continuation / cancelled |
+| `ScheduleWakeup` (due time from `delaySeconds`) | one wake-up, pending until a turn starts after it was due |
+| `CronCreate` `recurring: false` / `true`, job id from the tool result | one-shot job / recurring continuation |
+| `CronDelete` of a job id we saw created (successful result) | that job cancelled; the session settles when no recurring job is left |
 | first read starts inside the file (> 32 MB) | *history unknown* until a Stop hook snapshot |
 | writes below `<session>/subagents/` (background agents, workflows) | activity of the parent |
 | `isApiErrorMessage` with `rate_limit` / 429 / `quotaLimits` | rate limited (with reset time) |
 | `system/api_error` with `retryAttempt` | reconnecting |
 | `[Request interrupted by user` | interrupted |
-| hook `UserPromptSubmit` | turn started |
-| hook `Stop` + `background_tasks` + `session_crons` (≥ 2.1.145) | end of turn with authoritative pending work |
+| hook `UserPromptSubmit` / `UserPromptExpansion` | turn started |
+| hook `PreToolUse` for `ScheduleWakeup` / `CronCreate` | wake-up / continuation scheduled |
+| hook `PostToolUse` / `SubagentStart` (installed as async hooks) | heartbeat only, never revives a finished turn |
+| hook `Stop` + `background_tasks` + `session_crons` (≥ 2.1.145) | inferred end of turn with the authoritative pending-work snapshot; other Stop hooks may still block, so it never counts as a confirmed end |
 | hook `StopFailure` (`rate_limit` → rate limited, others → error) | failure |
-| hook `PermissionRequest`, `Notification` `permission_prompt` / `agent_needs_input` / `elicitation_*` | waiting for input |
+| hook `PermissionRequest`, `Elicitation`, `Notification` `permission_prompt` / `agent_needs_input` / `elicitation_*` | waiting for input |
 | hook `SessionStart` / `SessionEnd` | idle / ended |
-| `~/.claude/sessions/<pid>.json` (`sessionId`, `startedAt`, `entrypoint`, `status`) | pid ↔ session; `status` is only a veto (a busy process without a tracked session blocks) |
+| `~/.claude/sessions/<pid>.json` (`sessionId`, `startedAt`, `entrypoint`, `status`) | pid + process start ↔ session; `status` is only a veto (a busy process without a tracked session blocks) |
+| `hooks.Stop[].hooks[].timeout` in user, project (every tracked cwd and its parents), local, plugin `hooks/hooks.json` and managed settings | length of the inferred settle window (max + 1 min, at least 11 min) |
 
 Notes: the transcript is an internal format. No hook fires on a user interrupt. `SubagentStop` fires
 repeatedly on 2.1.309 and is ignored. Usage-limit auto-continue means a rate-limited session is
-paused, not finished. Installed hooks use exec form (`command` + `args`) and print nothing.
+paused, not finished. Installed hooks use exec form (`command` = hook path,
+`args` = `["claude_code", "--data-dir", <dir>]`) and print nothing. Parser state and file offsets
+are saved, so a restart continues reading instead of replaying the transcript.
 
 ## Codex — CLI, IDE extension, Codex desktop app
 
@@ -81,13 +91,22 @@ idle. OpenCode 2.x uses an incompatible plugin API and is not supported yet.
 
 ## Processes
 
-Process scans never complete a session. They detect agents we cannot see and block:
+Process scans never complete a session. A process is identified by (pid, start time), so a pid
+reused after a reboot is a different process. Scans detect agents we cannot see and block:
 
 - Gemini, Cursor or OpenCode running without the integration, started before it was installed,
-  or silent (no hook record since the process started);
+  or silent. A hook record proves only the process found in the hook's own ancestor chain
+  (pid, start time, tool), shared with its launcher or helper processes of the same tool; a
+  Claude Code hook running in Cursor's terminal does not prove Cursor;
 - a Claude Code process missing from the registry, or registered as busy without a tracked session;
-- a Codex CLI/exec process without an active rollout in its working directory since it started;
+- a Codex CLI/exec process without its own rollout (one rollout per process) active in its working
+  directory (`cwd`, `-C`/`--cd`) since it started. Threads of the Codex desktop app or IDE host stay
+  relevant as long as the host process runs;
+- a Claude Code or Codex process whose `CLAUDE_CONFIG_DIR` / `CODEX_HOME` differs from the
+  directory AgentGoodNight reads;
+- a failed process scan (environment unobservable);
 - a running WSL 2 VM (Windows, optional).
 
-Tracked Claude Code sessions whose process vanished mid-turn become `interrupted`; a session that
-only waited for background work becomes `ended` (nothing can continue it, nothing completed).
+Tracked Claude Code sessions whose process vanished mid-turn (absent from two consecutive
+successful scans with a readable registry) become `interrupted`; a session that only waited for
+background work becomes `ended` (nothing can continue it, nothing completed).

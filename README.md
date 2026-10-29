@@ -16,8 +16,14 @@ unknown, the computer stays on.
 
 AgentGoodNight never infers completion from a PID, a process exit, CPU usage or idleness.
 Completion comes only from an explicit end-of-work event emitted by the agent
-(e.g. Claude Code's `Stop` hook / `stop_hook_summary`, Codex's `task_complete`), followed by a
-quiet settle window that absorbs stop-hook continuations such as `/goal`.
+(e.g. Claude Code's `stop_hook_summary`, Codex's `task_complete`), followed by a quiet settle
+window that absorbs stop-hook continuations such as `/goal`:
+
+- **Confirmed end** (the tool says all its stop hooks have run): 90 s settle.
+- **Unconfirmed end** (Claude Code's final `end_turn` message, or its `Stop` hook, which runs
+  alongside other Stop hooks that may still block): 11 min settle, or the longest Stop-hook
+  timeout configured in the user, project, plugin or managed settings plus one minute. A settle
+  window is never shortened except by a confirmed end.
 
 The action runs only when **all** of these hold, and they are checked twice — the second time on a
 fresh full rescan at the end of the 60 s countdown:
@@ -32,21 +38,31 @@ fresh full rescan at the end of the 60 s countdown:
    an unreadable data directory, a rejected hook record or a failed process scan **blocks** the
    action. On Windows a running WSL 2 VM blocks too (agents inside it are invisible), unless
    turned off in the tools panel.
-5. No agent process is running that cannot be attributed to a tracked session — a hook-only tool
-   must have produced at least one hook record since its process started.
+5. No agent process is running that cannot be attributed to a tracked session:
+   - a Claude Code process needs its registry entry and a tracked session;
+   - a Codex CLI process needs its own rollout, active since it started, in its directory;
+   - a Gemini, Cursor or OpenCode process needs a hook record produced by that very process
+     (or its launcher/helper) since it started;
+   - a process whose `CLAUDE_CONFIG_DIR` / `CODEX_HOME` points somewhere else always blocks.
 
 A completion counts only as of the time its evidence says, never as of the moment it was
-discovered. New activity cancels the countdown, and so does a time gap such as the machine having
-slept: after wake-up only completions recorded from then on count. A clock that jumps backwards
-switches monitoring off. Shutdown never force-closes applications (apps may veto it).
-Individual sessions or processes can be excluded explicitly in the UI; an excluded session is
-tracked again as soon as it starts new work.
+discovered, and evidence dated in the future (a clock turned back) never completes anything.
+After a restart the log readers continue from their saved positions, so history is never
+replayed. New activity cancels the countdown, and so does a time gap of more than 15 s (e.g. the
+machine slept): after wake-up only completions recorded from then on count. A clock that jumps
+backwards switches monitoring off. A one-shot wake-up or cron job counts as fired only when a new
+turn starts after it was due. Right before the action is handed to the OS, the verdict is
+evaluated once more, so a Cancel or any change made during the last rescan still wins. Shutdown
+never force-closes applications (apps may veto it).
+
+Individual sessions or processes can be excluded explicitly in the UI. An excluded session is
+tracked again as soon as it starts new work; the exclusion survives restarts.
 
 ## Supported tools
 
 | Tool | Variants | Evidence | Setup | Status |
 |------|----------|----------|-------|--------|
-| Claude Code | CLI, IDE, Claude Desktop "Code" tab | transcripts in `~/.claude/projects` (end of turn, `/goal`, background tasks, interrupts, usage limits) + process registry; optional lifecycle hooks add `background_tasks`/`session_crons` and `StopFailure` | none (hooks optional, one click) | verified on Windows with Claude Code 2.1.309 |
+| Claude Code | CLI, IDE, Claude Desktop "Code" tab | transcripts in `~/.claude/projects` (end of turn, `/goal`, background tasks, crons, interrupts, usage limits) + subagent/workflow writes + process registry; optional lifecycle hooks add the authoritative `background_tasks`/`session_crons` list and `StopFailure` | none (hooks optional, one click) | verified on Windows with Claude Code 2.1.309 |
 | Codex | CLI, IDE extension, Codex desktop app | rollout files in `~/.codex/sessions` (`task_started`, `task_complete`, `turn_aborted`, goals, rate limits) | none | parser verified against real rollouts; approval waits are not persisted and simply count as running |
 | Gemini CLI | CLI ≥ 0.26 | lifecycle hooks (`BeforeAgent`/`AfterAgent`, tools, `ToolPermission`) | hooks (one click) | experimental — not verified on a real installation |
 | Cursor | editor ≥ 1.7, `cursor-agent` | hooks (`stop` with status, `sessionEnd`) | hooks (one click) | experimental; the CLI in `-p` mode emits no `stop` |
@@ -78,8 +94,10 @@ Without `--features real-power` the build contains only the simulated power mana
 
 ## Development and safety
 
-- `cargo test --workspace` runs unit tests and overnight simulations (concurrent sessions,
-  `/goal`, background tasks, rate limits, late log lines, countdown cancellation, ...).
+- `cargo test --workspace` runs unit tests, overnight simulations (concurrent sessions, `/goal`,
+  background tasks, rate limits, late log lines, sleep/wake, clock jumps, restarts, countdown
+  cancellation, ...) and a regression test for every finding of three independent adversarial
+  safety reviews (`crates/agn-adapters/tests/review_regressions.rs`).
 - The real OS power backend is compiled **only** in release builds with the `real-power` feature.
   Every debug or test build and any build without that feature physically lacks that code and uses
   a DryRun manager that only records what it would have done (the UI shows a *DRY RUN* badge).
@@ -101,9 +119,12 @@ or `~/.local/share/AgentGoodNight` (`AGN_DATA_DIR` overrides it).
 
 - Claude Code transcripts are an internal format; a format change makes sessions look *unknown*
   or *running* (the safe direction) until the adapter is updated.
-- Without hooks, a Claude Code CLI session that has no Stop hooks writes no end-of-turn summary;
-  its last `end_turn` message then counts only after 11 minutes (longer than any Stop hook's
-  default timeout). Installing the hooks gives exact timing.
+- A Claude Code CLI session without any Stop hooks writes no end-of-turn summary; its last
+  `end_turn` message then counts only after the long (11 min) settle. Installing the hooks adds a
+  Stop hook, so Claude Code writes the summary and the short settle applies.
+- In transcript-only mode, cron and one-shot jobs are matched by the job id Claude Code returns;
+  when no id can be read, the job is assumed to stay scheduled (the session keeps waiting) until a
+  Stop hook reports the authoritative list.
 - Transcripts are read from their last 32 MB. Work announced before that point is unknown, so
   such sessions wait (*older history unknown*) until a Stop hook reports the authoritative list
   of background tasks — connect the Claude Code hooks for very long sessions.
