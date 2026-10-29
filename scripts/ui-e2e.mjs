@@ -211,8 +211,9 @@ const env = {
   AGN_DATA_DIR: data,
   AGN_TEST_HOME: home,
   AGN_TEST_NO_PROCESSES: '1',
-  // Debug builds only: DevTools port and a WebView2 profile of its own.
-  AGN_TEST_DEVTOOLS_PORT: String(PORT),
+  // Debug builds on Windows only: DevTools port and a WebView2 profile of
+  // its own.
+  ...(WIN ? { AGN_TEST_DEVTOOLS_PORT: String(PORT) } : {}),
 };
 // Linux: tauri-driver starts the app (with this environment) for the session.
 const app = WIN
@@ -318,7 +319,7 @@ try {
   }
   console.log('sessions at the end:', await states());
 } catch (e) {
-  check(false, 'scenario', e.stack || String(e));
+  check(false, 'scenario', `${e.stack || e}${e.cause ? `\ncause: ${e.cause.stack || e.cause}` : ''}`);
 } finally {
   if (wdSession) await wd('DELETE', `/session/${wdSession}`).catch(() => {});
   if (!exited) app.kill();

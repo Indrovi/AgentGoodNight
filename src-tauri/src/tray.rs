@@ -67,9 +67,10 @@ pub fn build_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .ok_or_else(|| tauri::Error::WindowNotFound)?;
     #[allow(unused_mut)]
     let mut builder = WebviewWindowBuilder::from_config(app, &cfg)?;
-    // Debug builds only: the UI test drives the WebView2 window over the
-    // DevTools protocol, with a profile of its own.
-    #[cfg(debug_assertions)]
+    // Debug builds on Windows only: the UI test drives the WebView2 window
+    // over the DevTools protocol, with a profile of its own. (On Linux it
+    // uses WebDriver, which needs the default web context.)
+    #[cfg(all(debug_assertions, windows))]
     if let Some(port) = std::env::var("AGN_TEST_DEVTOOLS_PORT").ok().filter(|p| p.parse::<u16>().is_ok()) {
         tracing::warn!(port, "TEST: DevTools protocol enabled");
         builder = builder
