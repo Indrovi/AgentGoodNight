@@ -89,6 +89,23 @@ jobs:
         shell: bash
         run: npx --yes @tauri-apps/cli@2 build --config src-tauri/tauri.release.conf.json
 
+      - name: Install Xvfb
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y xvfb
+
+      - name: Smoke test – the built app starts and keeps running
+        shell: bash
+        run: scripts/smoke-app.sh target/release/agentgoodnight
+
+      # The debug build contains only the DryRun power manager. WebView2
+      # exposes the DevTools protocol, so the real window can be driven.
+      - name: UI end-to-end test (Windows, sandboxed agent data)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build -p agentgoodnight
+          node scripts/ui-e2e.mjs target/debug/agentgoodnight.exe
+
       - uses: actions/upload-artifact@v7
         with:
           name: agentgoodnight-dryrun-${{ matrix.os }}

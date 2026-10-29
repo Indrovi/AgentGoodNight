@@ -39,7 +39,8 @@ impl Engine {
         let power = system_power_manager();
         let hook_source = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(hook_bin_name())));
         let home = dirs_home();
-        let monitor_paths = MonitorPaths {
+        #[allow(unused_mut)]
+        let mut monitor_paths = MonitorPaths {
             data_dir: data_dir.clone(),
             claude_root: claude::default_root(),
             codex_root: codex::default_root(),
@@ -47,8 +48,11 @@ impl Engine {
             default_codex_root: home.as_ref().map(|h| h.join(".codex")),
             integration: IntegrationEnv::system(data_dir.clone(), paths::spool_dir(), hook_source),
         };
-        let mut monitor =
-            Monitor::new(settings, monitor_paths, ProcessSource::System(ProcessScanner::new()), power.backend());
+        #[allow(unused_mut)]
+        let mut procs = ProcessSource::System(ProcessScanner::new());
+        #[cfg(debug_assertions)]
+        apply_test_overrides(&mut monitor_paths, &mut procs);
+        let mut monitor = Monitor::new(settings, monitor_paths, procs, power.backend());
         if let Some(saved) = Monitor::load_state(&paths::state_path()) {
             monitor.restore(saved);
         }
@@ -176,6 +180,29 @@ impl Default for Engine {
 
 fn dirs_home() -> Option<PathBuf> {
     dirs::home_dir()
+}
+
+/// Debug builds only (absent from release binaries): `AGN_TEST_HOME` moves
+/// every agent directory into a sandbox and `AGN_TEST_NO_PROCESSES` replaces
+/// the process scan with an empty list, so the UI can be driven end to end
+/// with simulated agent data.
+#[cfg(debug_assertions)]
+fn apply_test_overrides(p: &mut MonitorPaths, procs: &mut ProcessSource) {
+    if let Some(home) = std::env::var_os("AGN_TEST_HOME").filter(|v| !v.is_empty()).map(PathBuf::from) {
+        tracing::warn!(home = %home.display(), "TEST: agent data is read from a sandbox");
+        p.claude_root = Some(home.join(".claude"));
+        p.codex_root = Some(home.join(".codex"));
+        p.default_claude_root = p.claude_root.clone();
+        p.default_codex_root = p.codex_root.clone();
+        p.integration.claude_root = p.claude_root.clone();
+        p.integration.gemini_root = Some(home.join(".gemini"));
+        p.integration.cursor_root = Some(home.join(".cursor"));
+        p.integration.opencode_root = Some(home.join(".config").join("opencode"));
+    }
+    if std::env::var_os("AGN_TEST_NO_PROCESSES").is_some() {
+        tracing::warn!("TEST: process scan replaced by an empty list");
+        *procs = ProcessSource::Fixed(Ok(Vec::new()), false);
+    }
 }
 
 pub fn spawn_loop(app: AppHandle, engine: Arc<Engine>) {
