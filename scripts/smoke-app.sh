@@ -47,6 +47,13 @@ if grep -Eq "panicked| ERROR " "$log"; then
   status=1
 fi
 
+if [[ "$status" != 0 && -n "${GITHUB_ACTIONS:-}" ]]; then
+  # Readable without a login, unlike the job log.
+  { echo "app log (tail):"; tail -n 40 "$log"; echo "processes:"; ps -eo pid,ppid,args 2>/dev/null | grep -iE "agentgoodnight|webkit|xvfb" | grep -v grep; } \
+    | sed 's/%/%25/g' | awk 'BEGIN { ORS = "%0A" } { print }' | sed 's/^/::error::/'
+  echo
+fi
+
 stop
 for _ in $(seq 1 20); do
   kill -0 "$pid" 2>/dev/null || break
