@@ -28,6 +28,21 @@ if (!fs.existsSync(exe) || !fs.existsSync(hookBin)) {
   console.error(`missing ${exe} or ${hookBin} — run: cargo build -p agentgoodnight -p agn-hook`);
   process.exit(2);
 }
+// The app is single-instance: a running AgentGoodNight would take over.
+const running = (() => {
+  try {
+    return WIN
+      ? execFileSync('tasklist', ['/FI', 'IMAGENAME eq agentgoodnight.exe', '/NH']).toString().includes('agentgoodnight.exe')
+      : execFileSync('sh', ['-c', 'pgrep -x agentgoodnight || true']).toString().trim() !== '';
+  } catch {
+    return false;
+  }
+})();
+if (running) {
+  console.error('AgentGoodNight is already running; quit it first (the app allows a single instance).');
+  if (process.env.GITHUB_ACTIONS) console.log('::error::UI e2e: another AgentGoodNight instance is running');
+  process.exit(2);
+}
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agn-ui-e2e-'));
 const home = path.join(root, 'home');
 const data = path.join(root, 'data');
@@ -338,7 +353,7 @@ try {
   await sleep(1000);
   if (failures) {
     console.log('\n--- app log ---\n' + log);
-    annotate(`app log (tail):\n${log.split('\n').slice(-25).join('\n')}`);
+    annotate(`app log (tail):\n${log.split('\n').slice(-60).join('\n')}`);
   }
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* webview may still hold files */ }
 }
