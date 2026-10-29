@@ -40,6 +40,10 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 echo "main window after $((SECONDS - start)) s"
+if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+  stages=$(grep -E "starting AgentGoodNight|setting up window|main window opened" "$log" | cut -c1-27,40-70 | tr '\n' ';')
+  echo "::notice::$os: main window after $((SECONDS - start)) s ($stages)"
+fi
 # Keep running for a while with the window open.
 sleep 15
 status=0
