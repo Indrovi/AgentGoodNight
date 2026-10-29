@@ -11,6 +11,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "AgentGoodNight",
         "width": 380,
         "height": 580,

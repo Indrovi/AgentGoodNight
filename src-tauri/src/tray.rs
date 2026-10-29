@@ -9,7 +9,7 @@ use agn_core::power::PowerAction;
 use agn_core::time::now_millis;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, WebviewWindowBuilder, Wry};
+use tauri::{AppHandle, Manager, WebviewWindow, WebviewWindowBuilder, Wry};
 
 use crate::engine::Engine;
 use agn_core::i18n::t;
@@ -43,23 +43,42 @@ pub fn show_main(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         if app.get_webview_window("main").is_none() {
-            let built = app
-                .config()
-                .app
-                .windows
-                .iter()
-                .find(|w| w.label == "main")
-                .map(|cfg| WebviewWindowBuilder::from_config(&app, cfg).and_then(|b| b.build()));
-            match built {
-                Some(Ok(w)) => {
+            match build_main(&app) {
+                Ok(w) => {
                     let _ = w.set_focus();
                 }
-                Some(Err(e)) => tracing::warn!(error = %e, "could not open the main window"),
-                None => tracing::warn!("main window missing from the configuration"),
+                Err(e) => tracing::warn!(error = %e, "could not open the main window"),
             }
         }
         OPENING.store(false, Ordering::Release);
     });
+}
+
+/// Builds the main window from its configuration (`create: false`, so the
+/// app decides when it exists).
+pub fn build_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    let cfg = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .cloned()
+        .ok_or_else(|| tauri::Error::WindowNotFound)?;
+    #[allow(unused_mut)]
+    let mut builder = WebviewWindowBuilder::from_config(app, &cfg)?;
+    // Debug builds only: the UI test drives the WebView2 window over the
+    // DevTools protocol, with a profile of its own.
+    #[cfg(debug_assertions)]
+    if let Some(port) = std::env::var("AGN_TEST_DEVTOOLS_PORT").ok().filter(|p| p.parse::<u16>().is_ok()) {
+        tracing::warn!(port, "TEST: DevTools protocol enabled");
+        builder = builder
+            .additional_browser_args(&format!(
+                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port={port}"
+            ))
+            .data_directory(agn_core::paths::data_dir().join("webview-test"));
+    }
+    builder.build()
 }
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {

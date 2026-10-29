@@ -102,12 +102,12 @@ async function connect() {
 // What runs, with which flags and ports, and which windows exist.
 function diagnose() {
   const ps = `
-$w = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Select-Object ProcessId, ParentProcessId, @{n='Cmd';e={$_.CommandLine.Substring(0, [Math]::Min(300, $_.CommandLine.Length))}}
+$w = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Select-Object ProcessId, ParentProcessId, @{n='Cmd';e={ if ($_.CommandLine -match '--type=') { $_.CommandLine.Substring(0, [Math]::Min(200, $_.CommandLine.Length)) } else { $_.CommandLine } }}
 "webview2 processes: $(@($w).Count)"; $w | ForEach-Object { "  $($_.ProcessId) <- $($_.ParentProcessId): $($_.Cmd)" }
 "listening on ${PORT}: " + (@(Get-NetTCPConnection -State Listen -LocalPort ${PORT} -ErrorAction SilentlyContinue).Count)
 $p = Get-Process -Id ${app.pid} -ErrorAction SilentlyContinue
 "app alive: $([bool]$p) window: '$($p.MainWindowTitle)' handle: $($p.MainWindowHandle) session: $($p.SessionId)"
-"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS in child env requested: --remote-debugging-port=${PORT}"`;
+"requested: AGN_TEST_DEVTOOLS_PORT=${PORT}"`;
   try {
     return execFileSync('powershell', ['-NoProfile', '-Command', ps]).toString();
   } catch (e) {
@@ -174,7 +174,8 @@ const app = spawn(exe, [], {
     AGN_DATA_DIR: data,
     AGN_TEST_HOME: home,
     AGN_TEST_NO_PROCESSES: '1',
-    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`,
+    // Debug builds only: DevTools port and a WebView2 profile of its own.
+    AGN_TEST_DEVTOOLS_PORT: String(PORT),
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });

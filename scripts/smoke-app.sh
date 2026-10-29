@@ -12,7 +12,8 @@ case "$(uname -s)" in
 esac
 data=$(mktemp -d)
 log="$data/app.log"
-export AGN_DATA_DIR="$data" NO_COLOR=1
+# WebView2 (Windows) gets its own profile as well.
+export AGN_DATA_DIR="$data" WEBVIEW2_USER_DATA_FOLDER="$data/webview" NO_COLOR=1
 
 if [[ "$(uname -s)" == Linux ]]; then
   xvfb-run -a "$bin" >"$log" 2>&1 &
