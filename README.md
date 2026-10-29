@@ -32,7 +32,9 @@ fresh full rescan at the end of the 60 s countdown:
    an unreadable data directory or a failed process scan **blocks** the action.
 5. No agent process is running that cannot be attributed to a tracked session.
 
-New activity cancels the countdown. Shutdown never force-closes applications (apps may veto it).
+New activity cancels the countdown, and so does a time gap such as the machine having slept: after
+wake-up only completions recorded from then on count. Shutdown never force-closes applications
+(apps may veto it).
 Individual sessions or processes can be excluded from the decision explicitly in the UI.
 
 ## Supported tools
@@ -96,6 +98,8 @@ or `~/.local/share/AgentGoodNight` (`AGN_DATA_DIR` overrides it).
 - A session whose app restarts mid-goal may need up to the last 32 MB of transcript to recover
   the `/goal` state.
 - Codex does not persist approval prompts, stream errors or reconnects; such turns stay *running*.
+- Only local agents are tracked: Claude Desktop chats and Cowork tasks, Codex cloud tasks and
+  Cursor background (cloud) agents are out of scope.
 - Gemini's `AfterAgent` may also fire after a stream error.
 - A build is not proof of correct behaviour on every OS; Linux and macOS power actions are
   untested on real hardware so far.

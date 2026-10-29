@@ -8,6 +8,7 @@
 pub mod config;
 pub mod countdown;
 pub mod event;
+pub mod i18n;
 pub mod model;
 pub mod paths;
 pub mod policy;

@@ -11,7 +11,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager, Wry};
 
 use crate::engine::Engine;
-use crate::i18n::t;
+use agn_core::i18n::t;
 
 const TRAY_ID: &str = "main";
 

@@ -8,9 +8,18 @@ repository.workspace = true
 rust-version.workspace = true
 default-run = "agentgoodnight"
 
+# The shell has no tests of its own (logic lives in agn-core/agn-adapters);
+# skipping the harness also avoids loading WebView/comctl32 in test runs.
 [lib]
 name = "agentgoodnight_lib"
 crate-type = ["rlib"]
+test = false
+doctest = false
+
+[[bin]]
+name = "agentgoodnight"
+path = "src/main.rs"
+test = false
 
 [features]
 # Real OS power actions. Only effective in release builds; see agn-core.

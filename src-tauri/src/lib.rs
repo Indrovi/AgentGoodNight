@@ -3,7 +3,6 @@
 
 mod commands;
 mod engine;
-mod i18n;
 mod tray;
 
 use std::sync::Arc;

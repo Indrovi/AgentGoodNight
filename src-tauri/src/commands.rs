@@ -11,7 +11,7 @@ use agn_core::time::now_millis;
 use tauri::{AppHandle, State};
 
 use crate::engine::Engine;
-use crate::i18n;
+use agn_core::i18n;
 
 type E<'a> = State<'a, Arc<Engine>>;
 
@@ -31,12 +31,7 @@ pub fn get_snapshot(engine: E<'_>) -> Snapshot {
 
 #[tauri::command]
 pub fn get_strings(lang: String) -> HashMap<String, String> {
-    let lang = i18n::normalize(&lang);
-    let raw = match lang {
-        "en" => include_str!("../../ui/i18n/en.json"),
-        _ => include_str!("../../ui/i18n/cs.json"),
-    };
-    serde_json::from_str(raw).unwrap_or_default()
+    i18n::strings(&lang)
 }
 
 #[tauri::command]
