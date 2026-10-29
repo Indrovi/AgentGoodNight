@@ -48,7 +48,8 @@ Individual sessions or processes can be excluded from the decision explicitly in
 | OpenCode | 1.x | plugin forwarding `session.status` / errors / permissions | plugin (one click) | experimental; 2.x plugin API not supported yet |
 
 Without the integration a running Gemini, Cursor or OpenCode process blocks the action, unless you
-turn that tool's tracking off.
+turn that tool's tracking off. The exact event-to-state mapping per tool is in
+[docs/adapters.md](docs/adapters.md).
 
 ### Integrations are opt-in and reversible
 
