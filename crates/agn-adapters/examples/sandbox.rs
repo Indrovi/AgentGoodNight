@@ -100,7 +100,7 @@ fn watch(agent: AgentKind, home: &Path, env: IntegrationEnv, secs: u64) {
         m.commit_spool();
         let snap = m.snapshot(now);
         let mut lines = Vec::new();
-        for a in snap.adapters.iter().filter(|a| a.name == agent.id()) {
+        for a in snap.adapters.iter().filter(|a| a.agent == agent) {
             lines.push(format!(
                 "adapter observable={} code={} installed={} procs={}",
                 a.observable, a.code, a.integration.installed, a.processes

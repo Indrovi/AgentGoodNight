@@ -24,10 +24,17 @@ fs.mkdirSync(data, { recursive: true });
 fs.writeFileSync(path.join(data, 'settings.json'), JSON.stringify({ settle_secs: 15, countdown_secs: 10, language: 'en' }));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const CI = !!process.env.GITHUB_ACTIONS;
+// CI machines are slower; timeouts scale.
+const T = (ms) => (CI ? ms * 3 : ms);
+const annotate = (text) => CI && console.log(`::error::${text.replace(/%/g, '%25').replace(/\r?\n/g, '%0A')}`);
 let failures = 0;
 function check(ok, what, detail = '') {
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}${detail && !ok ? ` — ${detail}` : ''}`);
-  if (!ok) failures++;
+  if (!ok) {
+    failures++;
+    annotate(`UI e2e: ${what}${detail ? ` — ${detail}` : ''}`);
+  }
 }
 
 // ------------------------------------------------------------ simulated agents
@@ -65,7 +72,7 @@ function codex(id, cwd, what) {
 // ------------------------------------------------------------------ CDP driver
 
 async function connect() {
-  for (let i = 0; i < 120; i++) {
+  for (let i = 0; i < T(120); i++) {
     try {
       const list = await (await fetch(`http://127.0.0.1:${PORT}/json`)).json();
       const page = list.find((t) => t.type === 'page');
@@ -98,7 +105,8 @@ async function js(expr) {
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
   return r.result.value;
 }
-async function until(expr, ms, what) {
+async function until(expr, timeout, what) {
+  const ms = T(timeout);
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
     try { if (await js(expr)) { check(true, what); return true; } } catch { /* page reloading */ }
@@ -108,12 +116,36 @@ async function until(expr, ms, what) {
   return false;
 }
 async function click(selector) {
-  const box = await js(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return null; const r = e.getBoundingClientRect(); return r.width ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null; })()`);
+  const box = await js(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return null; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return r.width ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null; })()`);
   if (!box) throw new Error(`not clickable: ${selector}`);
   for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
     await cdp.send('Input.dispatchMouseEvent', { type, x: box.x, y: box.y, button: 'left', clickCount: 1 });
   }
 }
+// Same as clicking the window's close button: WM_CLOSE to the app's window.
+function closeWindow(pid) {
+  const ps = `
+Add-Type @'
+using System; using System.Text; using System.Runtime.InteropServices;
+public static class W {
+  public delegate bool P(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(P f, IntPtr l);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+}
+'@
+$n = 0
+[W]::EnumWindows({ param($h, $l)
+  $p = 0; [void][W]::GetWindowThreadProcessId($h, [ref]$p)
+  $sb = New-Object System.Text.StringBuilder 64; [void][W]::GetWindowText($h, $sb, 64)
+  if ($p -eq ${pid} -and $sb.ToString() -eq 'AgentGoodNight') { [void][W]::PostMessage($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero); $script:n++ }
+  return $true }, [IntPtr]::Zero) | Out-Null
+"closed $n"`;
+  const out = execFileSync('powershell', ['-NoProfile', '-Command', ps]).toString().trim();
+  check(out === 'closed 1', 'window found and closed', out);
+}
+
 const states = () => js(`[...document.querySelectorAll('#session-list li')].map(li => li.querySelector('.item-title').textContent + '=' + li.querySelector('.state').className.replace('state ', ''))`);
 const stateOf = (name) => `[...document.querySelectorAll('#session-list li')].some(li => li.querySelector('.item-title').textContent === ${JSON.stringify(name)}`;
 const phase = (p) => `typeof snap !== 'undefined' && snap && snap.phase.phase === ${JSON.stringify(p)}`;
@@ -210,8 +242,8 @@ try {
   await click('#arm');
   await until(`snap.armed`, 5000, 're-armed');
   cdp.ws.close();
-  execFileSync('powershell', ['-NoProfile', '-Command', `$p = Get-Process -Id ${app.pid}; [void]$p.CloseMainWindow()`]);
-  await sleep(3000);
+  closeWindow(app.pid);
+  await sleep(T(3000));
   check(!exited, 'closing the window keeps the app running');
   const pages = await (await fetch(`http://127.0.0.1:${PORT}/json`).catch(() => null))?.json().catch(() => []) ?? [];
   check(!pages.some((t) => t.type === 'page'), 'closed window releases the webview');
@@ -227,7 +259,10 @@ try {
 } finally {
   if (!exited) app.kill();
   await sleep(1000);
-  if (failures) console.log('\n--- app log ---\n' + log);
+  if (failures) {
+    console.log('\n--- app log ---\n' + log);
+    annotate(`app log (tail):\n${log.split('\n').slice(-25).join('\n')}`);
+  }
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* webview may still hold files */ }
 }
 console.log(failures ? `\n${failures} check(s) failed` : '\nall UI checks passed');
