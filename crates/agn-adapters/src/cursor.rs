@@ -43,17 +43,32 @@ pub fn hook_events(rec: &SpoolRecord) -> Vec<AgentEvent> {
     match name {
         "sessionStart" => kinds.push(EventKind::SessionStarted { source: None }),
         "beforeSubmitPrompt" => kinds.push(EventKind::TurnStarted),
-        "preToolUse" | "postToolUse" | "postToolUseFailure" | "beforeShellExecution" | "afterShellExecution"
-        | "beforeMCPExecution" | "afterMCPExecution" | "beforeReadFile" | "afterFileEdit" | "afterAgentResponse"
-        | "afterAgentThought" | "subagentStart" => kinds.push(EventKind::Activity { detail: Some(name.to_string()) }),
+        "preToolUse"
+        | "postToolUse"
+        | "postToolUseFailure"
+        | "beforeShellExecution"
+        | "afterShellExecution"
+        | "beforeMCPExecution"
+        | "afterMCPExecution"
+        | "beforeReadFile"
+        | "afterFileEdit"
+        | "afterAgentResponse"
+        | "afterAgentThought"
+        | "subagentStart" => kinds.push(EventKind::Activity { detail: Some(name.to_string()) }),
         "subagentStop" | "preCompact" | "beforeTabFileRead" | "afterTabFileEdit" => kinds.push(EventKind::Heartbeat),
         "stop" => kinds.push(match status {
             "completed" => EventKind::TurnCompleted {
                 continuing: p.get("loop_count").and_then(Value::as_u64).unwrap_or(0) > 0,
                 pending: None,
             },
-            "aborted" => EventKind::TurnFailed { kind: FailureKind::Interrupted, reason: Some("aborted".into()), resets_at: None },
-            "error" => EventKind::TurnFailed { kind: FailureKind::Error, reason: Some("error".into()), resets_at: None },
+            "aborted" => EventKind::TurnFailed {
+                kind: FailureKind::Interrupted,
+                reason: Some("aborted".into()),
+                resets_at: None,
+            },
+            "error" => {
+                EventKind::TurnFailed { kind: FailureKind::Error, reason: Some("error".into()), resets_at: None }
+            }
             other => EventKind::Unrecognized { note: format!("cursor stop status {other:?}") },
         }),
         "sessionEnd" => {

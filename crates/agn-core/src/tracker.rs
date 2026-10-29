@@ -35,10 +35,11 @@ impl Default for TrackerConfig {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Tracker {
     cfg: TrackerConfig,
+    #[serde(with = "as_pairs")]
     sessions: BTreeMap<SessionKey, Session>,
     /// Finished subagent/background ids, so out-of-order delivery of a
     /// "finished" before its "started" cannot leave a phantom entry behind.
-    #[serde(default)]
+    #[serde(default, with = "as_pairs")]
     tombstones: BTreeMap<SessionKey, BTreeSet<String>>,
     #[serde(skip)]
     revision: u64,
@@ -91,7 +92,8 @@ impl Tracker {
     }
 
     /// Metadata from sources that prove nothing about activity (process
-    /// registry): attaches pid/origin/cwd without touching timestamps.
+    /// registry): attaches pid/origin/cwd without touching timestamps. A
+    /// registry cwd is the session's project directory and wins.
     pub fn annotate(&mut self, key: &SessionKey, pid: Option<u32>, origin: Option<&str>, cwd: Option<&str>) -> bool {
         let Some(s) = self.sessions.get_mut(key) else { return false };
         let before = (s.pid, s.origin.clone(), s.cwd.clone());
@@ -101,7 +103,7 @@ impl Tracker {
         if s.origin.is_none() {
             s.origin = origin.map(str::to_string);
         }
-        if s.cwd.is_none() {
+        if cwd.is_some() {
             s.cwd = cwd.map(str::to_string);
         }
         let changed = before != (s.pid, s.origin.clone(), s.cwd.clone());
@@ -125,15 +127,14 @@ impl Tracker {
         let key = ev.key();
         let settle = self.cfg.settle;
         let tombs = self.tombstones.entry(key.clone()).or_default();
-        let s = self
-            .sessions
-            .entry(key.clone())
-            .or_insert_with(|| Session::new(key, ev.at.min(now)));
+        let s = self.sessions.entry(key.clone()).or_insert_with(|| Session::new(key, ev.at.min(now)));
         let before = s.clone();
 
         s.sources.insert(ev.source);
-        if let Some(cwd) = &ev.cwd {
-            s.cwd = Some(cwd.clone());
+        // The first directory seen is the project; later ones are often the
+        // agent shell's current directory.
+        if s.cwd.is_none() {
+            s.cwd = ev.cwd.clone();
         }
         if ev.pid.is_some() {
             s.pid = ev.pid;
@@ -349,8 +350,7 @@ impl Tracker {
     /// Drops settled sessions that have been quiet for longer than `max_age`.
     pub fn prune(&mut self, now: Millis, max_age: Millis) -> usize {
         let before = self.sessions.len();
-        self.sessions
-            .retain(|_, s| !(s.state.is_settled() || s.ignored) || now - s.last_activity < max_age);
+        self.sessions.retain(|_, s| !(s.state.is_settled() || s.ignored) || now - s.last_activity < max_age);
         let keep: BTreeSet<SessionKey> = self.sessions.keys().cloned().collect();
         self.tombstones.retain(|k, _| keep.contains(k));
         let removed = before - self.sessions.len();
@@ -358,6 +358,26 @@ impl Tracker {
             self.revision += 1;
         }
         removed
+    }
+}
+
+/// JSON object keys must be strings; struct-keyed maps are stored as pairs.
+mod as_pairs {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer, K: Serialize, V: Serialize>(m: &BTreeMap<K, V>, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(m.iter())
+    }
+
+    pub fn deserialize<'de, D, K, V>(d: D) -> Result<BTreeMap<K, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        K: Deserialize<'de> + Ord,
+        V: Deserialize<'de>,
+    {
+        Ok(Vec::<(K, V)>::deserialize(d)?.into_iter().collect())
     }
 }
 
@@ -381,10 +401,7 @@ fn resume(s: &mut Session, at: Millis) {
     if s.state == SessionState::Running {
         return;
     }
-    if matches!(
-        s.state,
-        SessionState::AwaitingContinuation | SessionState::Finishing | SessionState::Completed
-    ) {
+    if matches!(s.state, SessionState::AwaitingContinuation | SessionState::Finishing | SessionState::Completed) {
         s.wakeup_scheduled = false;
     }
     transition(s, SessionState::Running, at, None);
@@ -436,5 +453,26 @@ fn continuation_reason(s: &Session) -> String {
         "background_task".into()
     } else {
         "scheduled_wakeup".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{AgentKind, EvidenceSource};
+
+    #[test]
+    fn json_roundtrip_keeps_sessions_and_tombstones() {
+        let mut t = Tracker::new(TrackerConfig::default());
+        let ev = |kind| AgentEvent::new(AgentKind::ClaudeCode, "s1", 10, kind, EvidenceSource::Simulation);
+        t.apply(&ev(EventKind::TurnStarted), 10);
+        t.apply(&ev(EventKind::BackgroundFinished { id: "b".into() }), 10);
+        t.set_ignored(&SessionKey::new(AgentKind::ClaudeCode, "s1"), true);
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Tracker = serde_json::from_str(&json).unwrap();
+        let s = back.get(&SessionKey::new(AgentKind::ClaudeCode, "s1")).unwrap();
+        assert!(s.ignored);
+        assert_eq!(s.state, SessionState::Running);
+        assert_eq!(back.tombstones.len(), 1);
     }
 }

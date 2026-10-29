@@ -20,7 +20,8 @@ fn main() {
         codex_root: codex::default_root(),
         integration: IntegrationEnv::system(data.clone(), data.join("spool"), None),
     };
-    let mut m = Monitor::new(Settings::default(), paths, ProcessSource::System(ProcessScanner::new()), PowerBackend::DryRun);
+    let mut m =
+        Monitor::new(Settings::default(), paths, ProcessSource::System(ProcessScanner::new()), PowerBackend::DryRun);
     let t0 = std::time::Instant::now();
     m.cycle(now_millis());
     let first = t0.elapsed();

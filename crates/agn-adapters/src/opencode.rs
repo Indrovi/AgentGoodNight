@@ -84,7 +84,8 @@ pub fn hook_events(rec: &SpoolRecord) -> Vec<AgentEvent> {
             "idle" => EventKind::TurnCompleted { continuing: false, pending: None },
             "retry" => {
                 let msg = str_field(&status, "message").unwrap_or("").to_lowercase();
-                let limited = msg.contains("rate") || msg.contains("429") || msg.contains("limit") || msg.contains("quota");
+                let limited =
+                    msg.contains("rate") || msg.contains("429") || msg.contains("limit") || msg.contains("quota");
                 EventKind::TurnFailed {
                     kind: if limited { FailureKind::RateLimited } else { FailureKind::Reconnecting },
                     reason: Some("retry".into()),
@@ -97,14 +98,20 @@ pub fn hook_events(rec: &SpoolRecord) -> Vec<AgentEvent> {
         "session.error" => {
             let name = p.get("error").and_then(|e| str_field(e, "name")).unwrap_or("");
             if name == "MessageAbortedError" {
-                EventKind::TurnFailed { kind: FailureKind::Interrupted, reason: Some("aborted".into()), resets_at: None }
+                EventKind::TurnFailed {
+                    kind: FailureKind::Interrupted,
+                    reason: Some("aborted".into()),
+                    resets_at: None,
+                }
             } else {
                 EventKind::TurnFailed { kind: FailureKind::Error, reason: Some(name.to_string()), resets_at: None }
             }
         }
         "session.created" => EventKind::SessionStarted { source: Some("startup".into()) },
         "session.deleted" => EventKind::SessionEnded { reason: Some("deleted".into()) },
-        "permission.asked" | "question.asked" => EventKind::WaitingForInput { reason: str_field(p, "event").map(str::to_string) },
+        "permission.asked" | "question.asked" => {
+            EventKind::WaitingForInput { reason: str_field(p, "event").map(str::to_string) }
+        }
         "permission.replied" | "question.replied" | "question.rejected" => EventKind::Activity { detail: None },
         _ => EventKind::Heartbeat,
     };
@@ -126,10 +133,18 @@ mod tests {
 
     #[test]
     fn maps_status_and_errors() {
-        assert_eq!(k(json!({"event":"session.status","sessionID":"o","status":{"type":"busy"}})), EventKind::TurnStarted);
-        assert!(matches!(k(json!({"event":"session.status","sessionID":"o","status":{"type":"idle"}})), EventKind::TurnCompleted { .. }));
+        assert_eq!(
+            k(json!({"event":"session.status","sessionID":"o","status":{"type":"busy"}})),
+            EventKind::TurnStarted
+        );
         assert!(matches!(
-            k(json!({"event":"session.status","sessionID":"o","status":{"type":"retry","message":"429 rate limited","next":5}})),
+            k(json!({"event":"session.status","sessionID":"o","status":{"type":"idle"}})),
+            EventKind::TurnCompleted { .. }
+        ));
+        assert!(matches!(
+            k(
+                json!({"event":"session.status","sessionID":"o","status":{"type":"retry","message":"429 rate limited","next":5}})
+            ),
             EventKind::TurnFailed { kind: FailureKind::RateLimited, resets_at: Some(5), .. }
         ));
         assert!(matches!(

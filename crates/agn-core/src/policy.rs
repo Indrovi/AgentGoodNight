@@ -136,9 +136,5 @@ pub fn evaluate(input: &PolicyInput<'_>, cfg: &PolicyConfig) -> Verdict {
         reasons.push(BlockReason::NoCompletionRecorded);
     }
 
-    if reasons.is_empty() {
-        Verdict::Ready { completed }
-    } else {
-        Verdict::Blocked { reasons }
-    }
+    if reasons.is_empty() { Verdict::Ready { completed } } else { Verdict::Blocked { reasons } }
 }

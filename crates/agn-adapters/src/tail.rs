@@ -19,11 +19,7 @@ const MAX_CHUNK: u64 = 8 * 1024 * 1024;
 const MAX_ZST: u64 = 64 * 1024 * 1024;
 
 pub fn mtime_millis(meta: &fs::Metadata) -> Millis {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as Millis)
-        .unwrap_or(0)
+    meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as Millis).unwrap_or(0)
 }
 
 #[derive(Debug)]
@@ -139,7 +135,7 @@ impl FileTail {
             // Emulate the initial window on decoded content.
             let mut acc = 0u64;
             let mut idx = all.len();
-            while idx > 0 && acc + all[idx - 1].len() as u64 + 1 <= initial_window {
+            while idx > 0 && acc + (all[idx - 1].len() as u64) < initial_window {
                 acc += all[idx - 1].len() as u64 + 1;
                 idx -= 1;
             }
@@ -212,11 +208,7 @@ pub fn newest_mtime(dir: &Path, max_depth: usize, budget: &mut usize) -> Option<
         *budget -= 1;
         let Ok(meta) = e.metadata() else { continue };
         let t = if meta.is_dir() {
-            if max_depth == 0 {
-                None
-            } else {
-                newest_mtime(&e.path(), max_depth - 1, budget)
-            }
+            if max_depth == 0 { None } else { newest_mtime(&e.path(), max_depth - 1, budget) }
         } else {
             Some(mtime_millis(&meta))
         };

@@ -202,10 +202,9 @@ pub fn read_registry(dir: &Path) -> Vec<RegistryEntry> {
     for (path, _) in files {
         let Ok(bytes) = fs::read(&path) else { continue };
         let Ok(v) = serde_json::from_slice::<Value>(&bytes) else { continue };
-        let (Some(pid), Some(session_id)) = (
-            v.get("pid").and_then(Value::as_u64),
-            v.get("sessionId").and_then(Value::as_str),
-        ) else {
+        let (Some(pid), Some(session_id)) =
+            (v.get("pid").and_then(Value::as_u64), v.get("sessionId").and_then(Value::as_str))
+        else {
             continue;
         };
         out.push(RegistryEntry {
@@ -240,8 +239,18 @@ pub struct LineParser {
 }
 
 const TERMINAL_TASK_STATUS: &[&str] = &[
-    "completed", "complete", "done", "failed", "error", "killed", "stopped", "cancelled", "canceled",
-    "timeout", "timed_out", "aborted",
+    "completed",
+    "complete",
+    "done",
+    "failed",
+    "error",
+    "killed",
+    "stopped",
+    "cancelled",
+    "canceled",
+    "timeout",
+    "timed_out",
+    "aborted",
 ];
 
 impl LineParser {
@@ -277,7 +286,11 @@ impl LineParser {
                 }
                 "api_error" => {
                     if v.get("retryAttempt").is_some() || v.get("retryInMs").is_some() {
-                        push(EventKind::TurnFailed { kind: FailureKind::Reconnecting, reason: Some("api_retry".into()), resets_at: None });
+                        push(EventKind::TurnFailed {
+                            kind: FailureKind::Reconnecting,
+                            reason: Some("api_retry".into()),
+                            resets_at: None,
+                        });
                     } else {
                         push(EventKind::Heartbeat);
                     }
@@ -373,7 +386,11 @@ impl LineParser {
             return kinds;
         }
         if joined.trim_start().starts_with("[Request interrupted by user") {
-            kinds.push(EventKind::TurnFailed { kind: FailureKind::Interrupted, reason: Some("user".into()), resets_at: None });
+            kinds.push(EventKind::TurnFailed {
+                kind: FailureKind::Interrupted,
+                reason: Some("user".into()),
+                resets_at: None,
+            });
             return kinds;
         }
         if joined.contains("<command-name>/goal</command-name>") {
@@ -585,7 +602,10 @@ pub fn hook_events(rec: &SpoolRecord) -> Vec<AgentEvent> {
         "Notification" => {
             let t = str_field(p, "notification_type").unwrap_or("");
             match t {
-                "permission_prompt" | "agent_needs_input" | "elicitation_dialog" | "elicitation_url_dialog"
+                "permission_prompt"
+                | "agent_needs_input"
+                | "elicitation_dialog"
+                | "elicitation_url_dialog"
                 | "quota_auto_resume_stale" => kinds.push(EventKind::WaitingForInput { reason: Some(t.to_string()) }),
                 "quota_auto_resume_fired" | "elicitation_complete" | "elicitation_response" => {
                     kinds.push(EventKind::Activity { detail: Some(t.to_string()) })
@@ -614,7 +634,8 @@ pub fn hook_events(rec: &SpoolRecord) -> Vec<AgentEvent> {
     kinds
         .into_iter()
         .map(|k| {
-            AgentEvent::new(AGENT, session_id, at, k, EvidenceSource::Hook).with_cwd(str_field(p, "cwd").map(str::to_string))
+            AgentEvent::new(AGENT, session_id, at, k, EvidenceSource::Hook)
+                .with_cwd(str_field(p, "cwd").map(str::to_string))
         })
         .collect()
 }
@@ -668,8 +689,8 @@ pub const REGISTRY_GRACE: Millis = HOUR;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agn_core::tracker::{Tracker, TrackerConfig};
     use agn_core::SessionState;
+    use agn_core::tracker::{Tracker, TrackerConfig};
     use serde_json::json;
 
     fn parse_all(lines: &[Value]) -> Vec<AgentEvent> {
@@ -750,7 +771,9 @@ mod tests {
         let mut done = lines.clone();
         done.push(json!({"type":"user","timestamp":ts(30),"turnOrigin":"task_notification","origin":{"kind":"task-notification"},
             "message":{"content":"<task-notification>\n<task-id>be4w3nxaq</task-id>\n<status>completed</status>\n<summary>ok</summary>\n</task-notification>"}}));
-        done.push(json!({"type":"system","subtype":"stop_hook_summary","timestamp":ts(40),"preventedContinuation":false}));
+        done.push(
+            json!({"type":"system","subtype":"stop_hook_summary","timestamp":ts(40),"preventedContinuation":false}),
+        );
         assert_eq!(run(&done, 4_000_000_000_000), SessionState::Completed);
     }
 
@@ -789,7 +812,11 @@ mod tests {
         let evs = parse_all(&[limit]);
         assert_eq!(
             evs[0].kind,
-            EventKind::TurnFailed { kind: FailureKind::RateLimited, reason: Some("five_hour".into()), resets_at: Some(1_793_300_000_000) }
+            EventKind::TurnFailed {
+                kind: FailureKind::RateLimited,
+                reason: Some("five_hour".into()),
+                resets_at: Some(1_793_300_000_000)
+            }
         );
         let int = json!({"type":"user","timestamp":ts(3),"message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}});
         assert!(matches!(parse_all(&[int])[0].kind, EventKind::TurnFailed { kind: FailureKind::Interrupted, .. }));
@@ -854,8 +881,12 @@ mod tests {
 
     #[test]
     fn hook_mapping() {
-        let mk = |v: Value| hook_events(&SpoolRecord::new("claude_code", v)).into_iter().map(|e| e.kind).collect::<Vec<_>>();
-        assert_eq!(mk(json!({"session_id":"s","hook_event_name":"UserPromptSubmit","prompt":"x"})), vec![EventKind::TurnStarted]);
+        let mk =
+            |v: Value| hook_events(&SpoolRecord::new("claude_code", v)).into_iter().map(|e| e.kind).collect::<Vec<_>>();
+        assert_eq!(
+            mk(json!({"session_id":"s","hook_event_name":"UserPromptSubmit","prompt":"x"})),
+            vec![EventKind::TurnStarted]
+        );
         assert!(matches!(
             mk(json!({"session_id":"s","hook_event_name":"StopFailure","error":"rate_limit"}))[0],
             EventKind::TurnFailed { kind: FailureKind::RateLimited, .. }
@@ -868,15 +899,23 @@ mod tests {
             mk(json!({"session_id":"s","hook_event_name":"Notification","notification_type":"permission_prompt"}))[0],
             EventKind::WaitingForInput { .. }
         ));
-        assert_eq!(mk(json!({"session_id":"s","hook_event_name":"Notification","notification_type":"idle_prompt"})), vec![EventKind::Heartbeat]);
+        assert_eq!(
+            mk(json!({"session_id":"s","hook_event_name":"Notification","notification_type":"idle_prompt"})),
+            vec![EventKind::Heartbeat]
+        );
         assert_eq!(mk(json!({"session_id":"s","hook_event_name":"SubagentStop"})), vec![EventKind::Heartbeat]);
-        assert!(matches!(mk(json!({"session_id":"s","hook_event_name":"PermissionRequest"}))[0], EventKind::WaitingForInput { .. }));
+        assert!(matches!(
+            mk(json!({"session_id":"s","hook_event_name":"PermissionRequest"}))[0],
+            EventKind::WaitingForInput { .. }
+        ));
         assert_eq!(
             mk(json!({"session_id":"s","hook_event_name":"SessionStart","source":"compact"})),
             vec![EventKind::SessionStarted { source: Some("compact".into()) }]
         );
         assert!(mk(json!({"hook_event_name":"Stop"})).is_empty(), "no session id, no event");
-        let k = mk(json!({"session_id":"s","hook_event_name":"PreToolUse","tool_name":"ScheduleWakeup","tool_input":{"delaySeconds":60}}));
+        let k = mk(
+            json!({"session_id":"s","hook_event_name":"PreToolUse","tool_name":"ScheduleWakeup","tool_input":{"delaySeconds":60}}),
+        );
         assert_eq!(k[0], EventKind::ContinuationScheduled { recurring: false });
     }
 

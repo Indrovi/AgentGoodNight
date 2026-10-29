@@ -358,7 +358,9 @@ impl Monitor {
         let mut claude_pids = BTreeSet::new();
         if enabled(AgentKind::ClaudeCode) {
             for entry in &self.registry {
-                let Some(proc_) = self.processes.iter().find(|p| p.pid == entry.pid && p.agent == AgentKind::ClaudeCode) else {
+                let Some(proc_) =
+                    self.processes.iter().find(|p| p.pid == entry.pid && p.agent == AgentKind::ClaudeCode)
+                else {
                     continue;
                 };
                 if !start_matches(proc_.start_time, entry.started_at) {
@@ -369,7 +371,9 @@ impl Monitor {
                 let origin = entry.entrypoint.as_deref().map(origin_from_entrypoint);
                 self.tracker.annotate(&key, Some(entry.pid), origin.as_deref(), entry.cwd.as_deref());
             }
-            for p in self.processes.iter().filter(|p| p.agent == AgentKind::ClaudeCode && p.role == ProcessRole::Session) {
+            for p in
+                self.processes.iter().filter(|p| p.agent == AgentKind::ClaudeCode && p.role == ProcessRole::Session)
+            {
                 if !claude_pids.contains(&p.pid) {
                     self.untracked.push(untracked(p, &self.ignored_procs));
                 }
@@ -387,9 +391,7 @@ impl Monitor {
             for key in gone {
                 // Only meaningful once the registry no longer lists the pid
                 // for this session (a restarted desktop session gets a new pid).
-                let still_listed = self.registry.iter().any(|r| {
-                    r.session_id == key.id && claude_pids.contains(&r.pid)
-                });
+                let still_listed = self.registry.iter().any(|r| r.session_id == key.id && claude_pids.contains(&r.pid));
                 if !still_listed {
                     self.tracker.process_gone(&key, now);
                 }
@@ -414,7 +416,13 @@ impl Monitor {
         self.health.clear();
         for agent in AgentKind::ALL {
             if !self.settings.agent_enabled(agent) {
-                self.health.push(AdapterHealth { agent, enabled: false, observable: true, code: "disabled".into(), detail: None });
+                self.health.push(AdapterHealth {
+                    agent,
+                    enabled: false,
+                    observable: true,
+                    code: "disabled".into(),
+                    detail: None,
+                });
                 continue;
             }
             let procs = self.processes.iter().filter(|p| p.agent == agent).count();
@@ -436,14 +444,18 @@ impl Monitor {
                         Some(SourceStatus::Ok) => AdapterHealth::ok(agent, ok_code),
                         Some(SourceStatus::Missing) | None if procs == 0 => AdapterHealth::ok(agent, "not_detected"),
                         Some(SourceStatus::Missing) | None => AdapterHealth::unobservable(agent, "no_data_dir", None),
-                        Some(SourceStatus::ReadError(e)) => AdapterHealth::unobservable(agent, "read_error", Some(e.clone())),
+                        Some(SourceStatus::ReadError(e)) => {
+                            AdapterHealth::unobservable(agent, "read_error", Some(e.clone()))
+                        }
                     }
                 }
                 _ => {
                     if installed {
                         match &self.spool_error {
                             Some(e) => AdapterHealth::unobservable(agent, "spool_error", Some(e.clone())),
-                            None => AdapterHealth::ok(agent, if agent == AgentKind::OpenCode { "plugin" } else { "hooks" }),
+                            None => {
+                                AdapterHealth::ok(agent, if agent == AgentKind::OpenCode { "plugin" } else { "hooks" })
+                            }
                         }
                     } else if procs > 0 {
                         AdapterHealth::unobservable(agent, "no_integration", None)
@@ -471,7 +483,8 @@ impl Monitor {
     }
 
     fn evaluate(&self, now: Millis) -> Verdict {
-        let sessions: Vec<&Session> = self.tracker.sessions().filter(|s| self.settings.agent_enabled(s.key.agent)).collect();
+        let sessions: Vec<&Session> =
+            self.tracker.sessions().filter(|s| self.settings.agent_enabled(s.key.agent)).collect();
         let alive_set = self.alive_pids();
         let alive = |s: &Session| s.pid.is_some_and(|p| alive_set.contains(&p));
         policy::evaluate(
@@ -570,7 +583,12 @@ fn view(s: &Session, relevant: bool) -> SessionView {
 }
 
 fn untracked(p: &AgentProcess, ignored: &BTreeSet<(u32, Millis)>) -> UntrackedProcess {
-    UntrackedProcess { agent: p.agent, pid: p.pid, name: p.name.clone(), ignored: ignored.contains(&(p.pid, p.start_time)) }
+    UntrackedProcess {
+        agent: p.agent,
+        pid: p.pid,
+        name: p.name.clone(),
+        ignored: ignored.contains(&(p.pid, p.start_time)),
+    }
 }
 
 /// Registry `startedAt` (ms) vs. OS process start (s resolution).

@@ -19,13 +19,8 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
-    pub const ALL: [AgentKind; 5] = [
-        AgentKind::ClaudeCode,
-        AgentKind::Codex,
-        AgentKind::GeminiCli,
-        AgentKind::OpenCode,
-        AgentKind::Cursor,
-    ];
+    pub const ALL: [AgentKind; 5] =
+        [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::GeminiCli, AgentKind::OpenCode, AgentKind::Cursor];
 
     /// Stable identifier used on the command line (`--hook <id>`), in spool
     /// files and in the UI.
@@ -98,18 +93,12 @@ pub enum SessionState {
 
 impl SessionState {
     pub fn is_blocking(self) -> bool {
-        !matches!(
-            self,
-            SessionState::Completed | SessionState::Idle | SessionState::Ended
-        )
+        !matches!(self, SessionState::Completed | SessionState::Idle | SessionState::Ended)
     }
 
     /// States after which only a new explicit turn start revives the session.
     pub fn is_settled(self) -> bool {
-        matches!(
-            self,
-            SessionState::Completed | SessionState::Idle | SessionState::Ended
-        )
+        matches!(self, SessionState::Completed | SessionState::Idle | SessionState::Ended)
     }
 
     pub fn id(self) -> &'static str {

@@ -209,7 +209,11 @@ impl RolloutParser {
                     out.push(self.event(at, kind));
                 }
             }
-            "response_item" | "turn_context" | "compacted" | "world_state" | "token_usage_record"
+            "response_item"
+            | "turn_context"
+            | "compacted"
+            | "world_state"
+            | "token_usage_record"
             | "inter_agent_communication_metadata" => out.push(self.event(at, EventKind::Heartbeat)),
             _ => {}
         }
@@ -269,7 +273,9 @@ impl RolloutParser {
                 reason: Some("stream_error".into()),
                 resets_at: None,
             },
-            "error" => EventKind::TurnFailed { kind: FailureKind::Error, reason: Some("error".into()), resets_at: None },
+            "error" => {
+                EventKind::TurnFailed { kind: FailureKind::Error, reason: Some("error".into()), resets_at: None }
+            }
             "exec_approval_request" | "apply_patch_approval_request" | "request_user_input" | "elicitation_request" => {
                 EventKind::WaitingForInput { reason: Some("approval".into()) }
             }
@@ -363,20 +369,40 @@ mod tests {
         let limited = vec![
             meta(),
             line(1, "event_msg", json!({"type":"task_started"})),
-            line(2, "event_msg", json!({"type":"token_count","rate_limits":{"primary":{"used_percent":100.0,"window_minutes":300,"resets_at":1793300000}}})),
-            line(3, "event_msg", json!({"type":"task_complete","error":{"message":"You've hit your usage limit","codex_error_info":"usage_limit_exceeded"}})),
+            line(
+                2,
+                "event_msg",
+                json!({"type":"token_count","rate_limits":{"primary":{"used_percent":100.0,"window_minutes":300,"resets_at":1793300000}}}),
+            ),
+            line(
+                3,
+                "event_msg",
+                json!({"type":"task_complete","error":{"message":"You've hit your usage limit","codex_error_info":"usage_limit_exceeded"}}),
+            ),
         ];
         let (s, evs) = state(&limited);
         assert_eq!(s, SessionState::RateLimited);
         assert!(evs.iter().any(|e| matches!(e.kind, EventKind::TurnFailed { resets_at: Some(1_793_300_000_000), .. })));
 
-        let err = vec![meta(), line(1, "event_msg", json!({"type":"task_started"})), line(2, "event_msg", json!({"type":"task_complete","error":{"message":"boom"}}))];
+        let err = vec![
+            meta(),
+            line(1, "event_msg", json!({"type":"task_started"})),
+            line(2, "event_msg", json!({"type":"task_complete","error":{"message":"boom"}})),
+        ];
         assert_eq!(state(&err).0, SessionState::Error);
 
-        let aborted = vec![meta(), line(1, "event_msg", json!({"type":"task_started"})), line(2, "event_msg", json!({"type":"turn_aborted","reason":"interrupted"}))];
+        let aborted = vec![
+            meta(),
+            line(1, "event_msg", json!({"type":"task_started"})),
+            line(2, "event_msg", json!({"type":"turn_aborted","reason":"interrupted"})),
+        ];
         assert_eq!(state(&aborted).0, SessionState::Interrupted);
 
-        let replaced = vec![meta(), line(1, "event_msg", json!({"type":"task_started"})), line(2, "event_msg", json!({"type":"turn_aborted","reason":"replaced"}))];
+        let replaced = vec![
+            meta(),
+            line(1, "event_msg", json!({"type":"task_started"})),
+            line(2, "event_msg", json!({"type":"turn_aborted","reason":"replaced"})),
+        ];
         assert_eq!(state(&replaced).0, SessionState::Running);
     }
 

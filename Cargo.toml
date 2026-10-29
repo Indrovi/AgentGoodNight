@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/agn-core", "crates/agn-adapters"]
-default-members = ["crates/agn-core", "crates/agn-adapters"]
+members = ["crates/agn-core", "crates/agn-adapters", "crates/agn-hook", "src-tauri"]
+default-members = ["crates/agn-core", "crates/agn-adapters", "crates/agn-hook"]
 
 [workspace.package]
 version = "0.1.0"

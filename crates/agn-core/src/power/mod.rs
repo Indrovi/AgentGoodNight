@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn test_builds_never_contain_real_power() {
-        assert!(!REAL_POWER_COMPILED);
+        const { assert!(!REAL_POWER_COMPILED) };
         assert_eq!(system_power_manager().backend(), PowerBackend::DryRun);
     }
 

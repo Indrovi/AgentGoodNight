@@ -1,0 +1,30 @@
+[package]
+name = "agentgoodnight"
+description = "Puts the computer to sleep once your AI coding agents have provably finished"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+default-run = "agentgoodnight"
+
+[lib]
+name = "agentgoodnight_lib"
+crate-type = ["rlib"]
+
+[features]
+# Real OS power actions. Only effective in release builds; see agn-core.
+real-power = ["agn-core/real-power"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+agn-core.workspace = true
+agn-adapters.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tauri = { version = "2.12", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2.5"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }

@@ -1,0 +1,73 @@
+name: Release
+
+# Manual only. Produces a *draft* pre-release that stays private until a
+# maintainer reviews and publishes it on GitHub.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag to create, e.g. v0.1.0 (must match tauri.conf.json)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Release (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Build hook binary as Tauri sidecar
+        shell: bash
+        run: scripts/build-hook.sh ${{ matrix.target }}
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tauriScript: npx --yes @tauri-apps/cli@2
+          tagName: ${{ inputs.version }}
+          releaseName: AgentGoodNight ${{ inputs.version }}
+          releaseBody: |
+            Draft build. Unsigned. Contains the real power backend (`real-power`).
+            See README for the safety model and the per-tool support level.
+          releaseDraft: true
+          prerelease: true
+          args: --target ${{ matrix.target }} --features real-power --config src-tauri/tauri.release.conf.json

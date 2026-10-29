@@ -118,10 +118,7 @@ mod platform {
             PowerAction::Sleep => "suspend",
             PowerAction::Shutdown => "poweroff",
         };
-        let status = Command::new("systemctl")
-            .arg(verb)
-            .status()
-            .map_err(|e| PowerError::Failed(e.to_string()))?;
+        let status = Command::new("systemctl").arg(verb).status().map_err(|e| PowerError::Failed(e.to_string()))?;
         if status.success() { Ok(()) } else { Err(PowerError::Failed(format!("exit status {status}"))) }
     }
 }

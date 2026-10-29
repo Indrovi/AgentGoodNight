@@ -46,7 +46,10 @@ pub fn hook_events(rec: &SpoolRecord) -> Vec<AgentEvent> {
         "" => return Vec::new(),
         _ => EventKind::Heartbeat,
     };
-    vec![AgentEvent::new(AGENT, session_id, at, kind, EvidenceSource::Hook).with_cwd(str_field(p, "cwd").map(str::to_string))]
+    vec![
+        AgentEvent::new(AGENT, session_id, at, kind, EvidenceSource::Hook)
+            .with_cwd(str_field(p, "cwd").map(str::to_string)),
+    ]
 }
 
 #[cfg(test)]
@@ -65,7 +68,10 @@ mod tests {
             k(json!({"session_id":"g","hook_event_name":"AfterAgent","stop_hook_active":true})),
             vec![EventKind::TurnCompleted { continuing: true, pending: None }]
         );
-        assert!(matches!(k(json!({"session_id":"g","hook_event_name":"Notification","notification_type":"ToolPermission"}))[0], EventKind::WaitingForInput { .. }));
+        assert!(matches!(
+            k(json!({"session_id":"g","hook_event_name":"Notification","notification_type":"ToolPermission"}))[0],
+            EventKind::WaitingForInput { .. }
+        ));
         assert!(k(json!({"hook_event_name":"AfterAgent"})).is_empty());
     }
 

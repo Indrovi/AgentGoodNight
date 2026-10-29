@@ -99,8 +99,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("s.json");
         assert_eq!(Settings::load(&p), Settings::default());
-        let mut s = Settings::default();
-        s.action = PowerAction::Shutdown;
+        let mut s = Settings { action: PowerAction::Shutdown, ..Default::default() };
         s.agents.insert(AgentKind::Cursor, false);
         s.save(&p).unwrap();
         let back = Settings::load(&p);

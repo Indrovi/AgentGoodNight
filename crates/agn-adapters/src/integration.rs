@@ -6,6 +6,7 @@
 //! * merges our entries into the existing configuration (all other keys,
 //!   hooks and their order are preserved),
 //! * is idempotent.
+//!
 //! Uninstalling removes exactly the entries that point at our hook binary.
 //! Our hook entries never print anything that could steer the agent.
 
@@ -138,7 +139,9 @@ pub fn status(agent: AgentKind, env: &IntegrationEnv) -> IntegrationStatus {
     let path = env.config_path(agent);
     let installed = match (agent, &path) {
         (AgentKind::Codex, _) => true,
-        (AgentKind::OpenCode, Some(p)) => fs::read_to_string(p).is_ok_and(|s| s.contains("AgentGoodNight lifecycle forwarder")),
+        (AgentKind::OpenCode, Some(p)) => {
+            fs::read_to_string(p).is_ok_and(|s| s.contains("AgentGoodNight lifecycle forwarder"))
+        }
         (_, Some(p)) => read_json(p).ok().flatten().is_some_and(|v| contains_our_hook(&v)),
         (_, None) => false,
     };
@@ -243,12 +246,8 @@ fn backup(path: &Path, env: &IntegrationEnv) -> io::Result<Option<PathBuf>> {
     let dir = env.data_dir.join("backups");
     fs::create_dir_all(&dir)?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("config");
-    let parent = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("x")
-        .trim_start_matches('.');
+    let parent =
+        path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("x").trim_start_matches('.');
     let dst = dir.join(format!("{}-{parent}-{name}", now_millis()));
     fs::copy(path, &dst)?;
     Ok(Some(dst))
@@ -262,10 +261,9 @@ fn read_json(path: &Path) -> Result<Option<Value>, IntegrationError> {
             if text.trim().is_empty() {
                 return Ok(Some(json!({})));
             }
-            serde_json::from_str(text).map(Some).map_err(|e| IntegrationError::InvalidConfig {
-                path: path.display().to_string(),
-                msg: e.to_string(),
-            })
+            serde_json::from_str(text)
+                .map(Some)
+                .map_err(|e| IntegrationError::InvalidConfig { path: path.display().to_string(), msg: e.to_string() })
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),

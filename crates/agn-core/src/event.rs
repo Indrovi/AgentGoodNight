@@ -94,23 +94,39 @@ pub enum FailureKind {
 pub enum EventKind {
     /// Session process started/resumed. `source` is tool specific
     /// (`startup`, `resume`, `clear`, `compact`).
-    SessionStarted { source: Option<String> },
+    SessionStarted {
+        source: Option<String>,
+    },
     /// A user prompt or task start — strong evidence that work begins.
     TurnStarted,
     /// Work is happening (tool call, model output, approval granted).
-    Activity { detail: Option<String> },
+    Activity {
+        detail: Option<String>,
+    },
     /// Weak evidence (a log file grew, an unclassified entry). Extends the
     /// settle window but never revives a settled session on its own.
     Heartbeat,
     /// The agent waits for the user (permission, question, plan approval).
-    WaitingForInput { reason: Option<String> },
-    SubagentStarted { id: String },
-    SubagentFinished { id: String },
-    BackgroundStarted { id: String },
-    BackgroundFinished { id: String },
+    WaitingForInput {
+        reason: Option<String>,
+    },
+    SubagentStarted {
+        id: String,
+    },
+    SubagentFinished {
+        id: String,
+    },
+    BackgroundStarted {
+        id: String,
+    },
+    BackgroundFinished {
+        id: String,
+    },
     /// A wake-up / follow-up was scheduled. `recurring` keeps the session
     /// alive until it ends.
-    ContinuationScheduled { recurring: bool },
+    ContinuationScheduled {
+        recurring: bool,
+    },
     /// Explicit end-of-turn signal from the tool (Stop hook, task_complete,
     /// AfterAgent, session.idle, ...).
     TurnCompleted {
@@ -124,16 +140,22 @@ pub enum EventKind {
     },
     /// A goal / objective that auto-continues the session was set or
     /// cleared (`/goal` in Claude Code, thread goals in Codex).
-    GoalStatus { active: bool },
+    GoalStatus {
+        active: bool,
+    },
     /// The turn ended without success, or the agent is retrying.
     TurnFailed {
         kind: FailureKind,
         reason: Option<String>,
         resets_at: Option<Millis>,
     },
-    SessionEnded { reason: Option<String> },
+    SessionEnded {
+        reason: Option<String>,
+    },
     /// Evidence we could not classify. Puts the session in `Unknown`.
-    Unrecognized { note: String },
+    Unrecognized {
+        note: String,
+    },
 }
 
 impl EventKind {

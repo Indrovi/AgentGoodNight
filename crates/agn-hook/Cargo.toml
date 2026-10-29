@@ -1,0 +1,16 @@
+[package]
+name = "agn-hook"
+description = "Tiny hook executable that AI agents invoke; forwards lifecycle events to AgentGoodNight"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "agentgoodnight-hook"
+path = "src/main.rs"
+
+[dependencies]
+agn-core.workspace = true
+agn-adapters.workspace = true

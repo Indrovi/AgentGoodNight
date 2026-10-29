@@ -46,9 +46,7 @@ impl ProcessScanner {
             self.sys = Some(System::new().map_err(|e| e.to_string())?);
         }
         let sys = self.sys.as_mut().ok_or("process scanner unavailable")?;
-        let kind = ProcessRefreshKind::nothing()
-            .with_exe(UpdateKind::OnlyIfNotSet)
-            .with_cmd(UpdateKind::OnlyIfNotSet);
+        let kind = ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet).with_cmd(UpdateKind::OnlyIfNotSet);
         let n = sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
         if n == 0 && sys.processes().is_empty() {
             return Err("process list is empty".into());
@@ -113,7 +111,10 @@ pub fn classify(name: &str, exe: Option<&Path>, cmd: &[String]) -> Option<(Agent
         "node" | "bun" | "deno" => {
             if cmd_s.contains("@anthropic-ai/claude-code") || cmd_s.contains("claude-code/cli") {
                 Some((AgentKind::ClaudeCode, ProcessRole::Session, Some("cli".into())))
-            } else if cmd_s.contains("@google/gemini-cli") || cmd_s.contains("gemini-cli/") || cmd_ends_with_bin(cmd, "gemini") {
+            } else if cmd_s.contains("@google/gemini-cli")
+                || cmd_s.contains("gemini-cli/")
+                || cmd_ends_with_bin(cmd, "gemini")
+            {
                 Some((AgentKind::GeminiCli, ProcessRole::Session, None))
             } else if cmd_s.contains("cursor-agent") {
                 Some((AgentKind::Cursor, ProcessRole::Session, Some("cli".into())))
@@ -155,8 +156,14 @@ mod tests {
         assert_eq!(c("claude.exe", app, &[app]), None, "desktop main process");
         assert_eq!(c("claude.exe", app, &[app, "--type=renderer"]), None, "electron helper");
         let cc = r"C:\Users\u\AppData\Roaming\Claude\claude-code\2.1.309\9078\claude.exe";
-        assert_eq!(c("claude.exe", cc, &[cc, "--output-format", "stream-json"]), Some((AgentKind::ClaudeCode, ProcessRole::Session)));
-        assert_eq!(c("claude", "/home/u/.local/bin/claude", &["claude"]), Some((AgentKind::ClaudeCode, ProcessRole::Session)));
+        assert_eq!(
+            c("claude.exe", cc, &[cc, "--output-format", "stream-json"]),
+            Some((AgentKind::ClaudeCode, ProcessRole::Session))
+        );
+        assert_eq!(
+            c("claude", "/home/u/.local/bin/claude", &["claude"]),
+            Some((AgentKind::ClaudeCode, ProcessRole::Session))
+        );
         assert_eq!(c("Claude", "/Applications/Claude.app/Contents/MacOS/Claude", &[]), None);
         assert_eq!(
             c("node", "/usr/bin/node", &["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"]),

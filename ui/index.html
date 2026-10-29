@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AgentGoodNight</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="icons.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main id="main-view" class="view">
+    <header class="top">
+      <span class="logo" id="logo"></span>
+      <h1 data-i18n="app.title">AgentGoodNight</h1>
+      <span id="dry-badge" class="badge" hidden data-i18n="app.dryRun">SIMULACE</span>
+    </header>
+
+    <section class="controls">
+      <div class="row">
+        <span class="label" data-i18n="monitor.label">Hlídání</span>
+        <button id="arm" class="switch" role="switch" aria-checked="false" aria-label="monitoring">
+          <span class="knob"></span>
+        </button>
+      </div>
+      <div class="segmented" role="radiogroup">
+        <button type="button" role="radio" data-action="sleep" data-i18n="action.sleep">Uspat</button>
+        <button type="button" role="radio" data-action="shutdown" data-i18n="action.shutdown">Vypnout</button>
+      </div>
+    </section>
+
+    <section id="status" class="status" aria-live="polite">
+      <span id="status-dot" class="dot"></span>
+      <div class="status-text">
+        <div id="status-title" class="status-title"></div>
+        <div id="status-sub" class="muted small"></div>
+      </div>
+      <button id="cancel" class="btn danger" hidden data-i18n="status.cancel">Zrušit</button>
+      <div id="progress" class="progress" hidden><span id="progress-bar"></span></div>
+    </section>
+
+    <section class="sessions">
+      <div class="section-head">
+        <h2 data-i18n="sessions.title">Relace</h2>
+        <span id="session-count" class="muted small"></span>
+      </div>
+      <ul id="untracked-list" class="list"></ul>
+      <ul id="session-list" class="list"></ul>
+      <p id="sessions-empty" class="empty muted small" data-i18n="sessions.empty"></p>
+    </section>
+
+    <footer class="bottom">
+      <button id="open-settings" class="link" type="button"><span class="gear"></span><span data-i18n="settings.open">Nástroje</span></button>
+    </footer>
+  </main>
+
+  <section id="settings-view" class="view" hidden>
+    <header class="top">
+      <button id="close-settings" class="link back" type="button" data-i18n="settings.back">Zpět</button>
+      <h1 class="grow" data-i18n="settings.title">Nástroje a integrace</h1>
+    </header>
+    <ul id="adapter-list" class="list adapters"></ul>
+    <div class="row lang-row">
+      <label for="lang" class="label" data-i18n="settings.language">Jazyk</label>
+      <select id="lang">
+        <option value="cs">Čeština</option>
+        <option value="en">English</option>
+      </select>
+    </div>
+    <p id="settings-msg" class="muted small msg"></p>
+  </section>
+
+  <div id="modal" class="modal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true">
+      <p id="modal-text"></p>
+      <div class="modal-actions">
+        <button id="modal-no" class="btn" type="button" data-i18n="status.cancel">Zrušit</button>
+        <button id="modal-yes" class="btn primary" type="button">OK</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

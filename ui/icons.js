@@ -1,0 +1,14 @@
+// Static, generic glyphs (not vendor logos). Only trusted constants are ever
+// assigned to innerHTML.
+window.AGN_ICONS = {
+  logo: '<svg viewBox="0 0 24 24"><defs><mask id="lm"><rect width="24" height="24" fill="#fff"/><circle cx="15" cy="8" r="6.5" fill="#000"/></mask></defs><circle cx="11" cy="12" r="8" fill="#f4c15d" mask="url(#lm)"/><path d="M14.5 16.5l2.2 1.5-2.2 1.5" fill="none" stroke="#8fb3ff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  claude_code: '<svg viewBox="0 0 24 24"><g stroke="#d97757" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v18"/><path d="M3 12h18"/><path d="M5.6 5.6l12.8 12.8"/><path d="M18.4 5.6L5.6 18.4"/></g></svg>',
+  codex: '<svg viewBox="0 0 24 24"><path d="M12 2.5l8.2 4.75v9.5L12 21.5l-8.2-4.75v-9.5z" fill="none" stroke="#c9d1e0" stroke-width="1.8" stroke-linejoin="round"/><path d="M8.5 9.5l3 2.5-3 2.5M13 15h3" fill="none" stroke="#c9d1e0" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  gemini_cli: '<svg viewBox="0 0 24 24"><defs><linearGradient id="gg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5b8cff"/><stop offset="1" stop-color="#b07cff"/></linearGradient></defs><path d="M12 2c.6 5.2 4.8 9.4 10 10-5.2.6-9.4 4.8-10 10-.6-5.2-4.8-9.4-10-10 5.2-.6 9.4-4.8 10-10z" fill="url(#gg)"/></svg>',
+  opencode: '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4" fill="none" stroke="#e6e8ef" stroke-width="1.8"/><path d="M10 8.5L7 12l3 3.5M14 8.5l3 3.5-3 3.5" fill="none" stroke="#e6e8ef" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  cursor: '<svg viewBox="0 0 24 24"><path d="M5 3.5l13 8.2-6.1 1.3-3.2 5.6z" fill="#e6e8ef" stroke="#e6e8ef" stroke-width="1.2" stroke-linejoin="round"/></svg>',
+  warn: '<svg viewBox="0 0 24 24"><path d="M12 3l9.5 17h-19z" fill="none" stroke="#f4b23e" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4.5M12 17.5v.5" stroke="#f4b23e" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  eyeOff: '<svg viewBox="0 0 24 24"><path d="M3 3l18 18M10.6 10.6a2 2 0 002.8 2.8M9.9 5.1A9.6 9.6 0 0112 5c5 0 9 5 9 7-.4.9-1.3 2.2-2.6 3.4M6.6 6.6C4.6 7.9 3.4 9.8 3 12c0 2 4 7 9 7 1.6 0 3-.4 4.3-1" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>',
+  eye: '<svg viewBox="0 0 24 24"><path d="M3 12c0-2 4-7 9-7s9 5 9 7-4 7-9 7-9-5-9-7z" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="12" r="2.6" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>',
+  gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>'
+};

@@ -59,12 +59,7 @@ static SEQ: AtomicU32 = AtomicU32::new(0);
 pub fn write_record(dir: &Path, record: &SpoolRecord) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let name = format!(
-        "{:013}-{}-{}.json",
-        record.received_at,
-        record.hook_pid.unwrap_or(0),
-        seq
-    );
+    let name = format!("{:013}-{}-{}.json", record.received_at, record.hook_pid.unwrap_or(0), seq);
     let tmp = dir.join(format!(".{name}.tmp"));
     let dst = dir.join(&name);
     {

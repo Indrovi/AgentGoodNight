@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AgentGoodNight",
+  "version": "0.1.0",
+  "identifier": "io.github.indrovi.agentgoodnight",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "AgentGoodNight",
+        "width": 380,
+        "height": 580,
+        "minWidth": 340,
+        "minHeight": 440,
+        "resizable": true,
+        "maximizable": false,
+        "theme": "Dark",
+        "backgroundColor": "#0f1115",
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "shortDescription": "Sleep or shut down after AI coding agents finish",
+    "longDescription": "AgentGoodNight watches local AI coding agent sessions (Claude Code, Codex, Gemini CLI, Cursor, OpenCode) and sleeps or shuts down the computer only after every tracked task has provably finished.",
+    "copyright": "Copyright (c) 2026 Indrovi. MIT License.",
+    "license": "MIT",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

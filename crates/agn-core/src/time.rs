@@ -11,10 +11,7 @@ pub const MINUTE: Millis = 60 * SECOND;
 pub const HOUR: Millis = 60 * MINUTE;
 
 pub fn now_millis() -> Millis {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as Millis)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as Millis).unwrap_or(0)
 }
 
 pub trait Clock: Send + Sync {
@@ -119,18 +116,9 @@ mod tests {
     fn parses_common_formats() {
         assert_eq!(parse_rfc3339_millis("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339_millis("1970-01-01T00:00:01.5Z"), Some(1_500));
-        assert_eq!(
-            parse_rfc3339_millis("2026-10-29T12:00:00.123Z"),
-            Some(1_793_275_200_123)
-        );
-        assert_eq!(
-            parse_rfc3339_millis("2026-10-29T14:00:00+02:00"),
-            Some(1_793_275_200_000)
-        );
-        assert_eq!(
-            parse_rfc3339_millis("2026-10-29T12:00:00.123456789Z"),
-            Some(1_793_275_200_123)
-        );
+        assert_eq!(parse_rfc3339_millis("2026-10-29T12:00:00.123Z"), Some(1_793_275_200_123));
+        assert_eq!(parse_rfc3339_millis("2026-10-29T14:00:00+02:00"), Some(1_793_275_200_000));
+        assert_eq!(parse_rfc3339_millis("2026-10-29T12:00:00.123456789Z"), Some(1_793_275_200_123));
     }
 
     #[test]

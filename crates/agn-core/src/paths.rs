@@ -13,9 +13,7 @@ pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|v| !v.is_empty()) {
         return PathBuf::from(dir);
     }
-    dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(APP_DIR_NAME)
+    dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join(APP_DIR_NAME)
 }
 
 pub fn spool_dir() -> PathBuf {

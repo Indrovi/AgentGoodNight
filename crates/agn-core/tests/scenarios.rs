@@ -381,8 +381,8 @@ fn ignored_and_stale_sessions_do_not_block() {
 #[test]
 fn stale_session_with_live_process_still_blocks() {
     let mut sim = Sim::new();
-    let e = AgentEvent::new(ClaudeCode, "long", sim.now, EventKind::TurnStarted, EvidenceSource::Hook)
-        .with_pid(Some(777));
+    let e =
+        AgentEvent::new(ClaudeCode, "long", sim.now, EventKind::TurnStarted, EvidenceSource::Hook).with_pid(Some(777));
     sim.tracker.apply(&e, sim.now);
     sim.alive_pids.push(777);
     sim.now += 30 * 60 * MINUTE;

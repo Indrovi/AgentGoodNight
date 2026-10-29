@@ -6,3 +6,4 @@ node_modules/
 Thumbs.db
 *.log
 .cargo/config.toml
+/src-tauri/binaries
